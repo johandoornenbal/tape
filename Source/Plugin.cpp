@@ -2,48 +2,47 @@
 #include "TapeEngine.h"
 #include <atomic>
 
-namespace controls {
-constexpr std::array<const char*,9> ids{"input","tilt","shape","flutter","flutterSpeed","bias","headBump","headFrequency","output"};
-constexpr std::array<const char*,9> names{"Input","Tilt","Shape","Flutter","Flutter speed","Bias","Head bump","Head frequency","Output"};
-constexpr std::array<const char*,9> tips{
-    "Drive into the tape circuit. 50% is unity gain.",
-    "Balance the upstream Dubly encode and decode stages.",
-    "Set the Dubly encode/decode filter shape.",
-    "Tape flutter depth. Zero removes the modulation.",
-    "Tape flutter modulation speed.",
-    "Tape bias. 50% is the neutral bias setting.",
-    "Low-frequency head bump amount.",
-    "Head bump resonance frequency, 25 to 200 Hz.",
-    "Output gain before the original ClipOnly3 stage. 50% is unity gain."};
-juce::String display(int i, double v) {
-    if(i==7) return juce::String(v*v*175.0+25.0,1)+" Hz";
-    return juce::String(v*100.0,1)+" %";
-}
-double parse(int i,const juce::String& text) {
-    const auto v=text.getDoubleValue();
-    return i==7?std::sqrt(juce::jlimit(0.0,1.0,(v-25.0)/175.0)):v/100.0;
-}
-}
+#include "TapeControls.h"
+#include "TapeEngine7.h"
+#include "TapeEngine8.h"
+
 class TapeProcessor final : public juce::AudioProcessor {
 public:
     TapeProcessor() : AudioProcessor(BusesProperties()
         .withInput("Input",juce::AudioChannelSet::stereo(),true)
         .withOutput("Output",juce::AudioChannelSet::stereo(),true)),
         state(*this,nullptr,"ToTape9State",layout()) {
-        for(size_t i=0;i<values.size();++i) values[i]=state.getRawParameterValue(controls::ids[i]);
+        for(int version=7;version<=9;++version)
+            for(int i=0;i<controls::count(version);++i) values[static_cast<size_t>(version-7)][static_cast<size_t>(i)]=state.getRawParameterValue(controls::id(version,i));
+        versionValue=state.getRawParameterValue("version");
+        defaults=state.copyState();
     }
     static juce::AudioProcessorValueTreeState::ParameterLayout layout() {
         juce::AudioProcessorValueTreeState::ParameterLayout p;
-        for(int i=0;i<9;++i) {
+        // Keep the original nine parameter IDs and indices for existing sessions/automation.
+        for(int version:{9,8,7}) for(int i=0;i<controls::count(version);++i) {
             auto attributes=juce::AudioParameterFloatAttributes()
                 .withStringFromValueFunction([i](float v,int) { return controls::display(i,v); })
-                .withValueFromStringFunction([i](const juce::String& s) { return static_cast<float>(controls::parse(i,s)); });
-            p.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{controls::ids[static_cast<size_t>(i)],1},
-                controls::names[static_cast<size_t>(i)],juce::NormalisableRange<float>(0,1),.5f,attributes));
+                .withValueFromStringFunction([i](const juce::String& text) { return static_cast<float>(controls::parse(i,text)); });
+            const auto name=(version==9?juce::String():"ToTape"+juce::String(version)+" ")+controls::name(version,i);
+            p.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{controls::id(version,i),1},
+                name,juce::NormalisableRange<float>(0,1),.5f,attributes));
         }
+        p.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{"version",1},"Tape version",
+            juce::StringArray{"ToTape7","ToTape8","ToTape9"},2));
         return p;
     }
-    void prepareToPlay(double rate,int) override { engine.reset(rate); setLatencySamples(1); peaks[0]=0; peaks[1]=0; }
+    int selectedVersion() const { return juce::jlimit(7,9,7+juce::roundToInt(versionValue->load())); }
+    void prepareToPlay(double rate,int) override {
+        sampleRate=rate; engine.reset(rate); engine7.reset(rate); engine8.reset(rate);
+        activeVersion=selectedVersion(); setLatencySamples(1); peaks[0]=0; peaks[1]=0;
+    }
+    template<class Engine,class T> void render(Engine& e,juce::AudioBuffer<T>& b,int version) {
+        for(int i=0;i<controls::count(version);++i) e.setParameter(i,values[static_cast<size_t>(version-7)][static_cast<size_t>(i)]->load());
+        T* data[]{b.getWritePointer(0),b.getWritePointer(1)};
+        if constexpr (std::is_same_v<T,float>) e.processReplacing(data,data,b.getNumSamples());
+        else e.processDoubleReplacing(data,data,b.getNumSamples());
+    }
     void releaseResources() override { peaks[0]=0; peaks[1]=0; }
     bool isBusesLayoutSupported(const BusesLayout& b) const override {
         return b.getMainInputChannelSet()==juce::AudioChannelSet::stereo()
@@ -52,10 +51,17 @@ public:
     template<class T> void process(juce::AudioBuffer<T>& b) {
         juce::ScopedNoDenormals guard;
         if(b.getNumChannels()<2) { b.clear(); return; }
-        for(int i=0;i<9;++i) engine.setParameter(i,values[static_cast<size_t>(i)]->load());
-        T* data[]{b.getWritePointer(0),b.getWritePointer(1)};
-        if constexpr (std::is_same_v<T,float>) engine.processReplacing(data,data,b.getNumSamples());
-        else engine.processDoubleReplacing(data,data,b.getNumSamples());
+        const int version=selectedVersion();
+        if(version!=activeVersion) {
+            // Reset only the entering engine, on the audio thread, without allocation.
+            if(version==7) engine7.reset(sampleRate);
+            else if(version==8) engine8.reset(sampleRate);
+            else engine.reset(sampleRate);
+            activeVersion=version;
+        }
+        if(version==7) render(engine7,b,version);
+        else if(version==8) render(engine8,b,version);
+        else render(engine,b,version);
         for(int c=0;c<2;++c) {
             const auto peak=static_cast<float>(b.getMagnitude(c,0,b.getNumSamples()));
             auto old=peaks[c].load(std::memory_order_relaxed);
@@ -81,13 +87,28 @@ public:
     }
     void setStateInformation(const void* data,int size) override {
         if(auto xml=getXmlFromBinary(data,size); xml && xml->hasTagName(state.state.getType()))
-            state.replaceState(juce::ValueTree::fromXml(*xml));
+        {
+            auto restored=juce::ValueTree::fromXml(*xml);
+            // Legacy ToTape9 sessions have no version or extra banks. Supply defaults
+            // even when loading into an instance that previously selected another version.
+            for(const auto& child:defaults) {
+                const auto id=child.getProperty("id");
+                if(!restored.getChildWithProperty("id",id).isValid()) restored.addChild(child.createCopy(),-1,nullptr);
+            }
+            state.replaceState(restored);
+        }
     }
     juce::AudioProcessorValueTreeState state;
     std::atomic<float> peaks[2]{};
 private:
     TapeEngine engine;
-    std::array<std::atomic<float>*,9> values{};
+    TapeEngine7 engine7;
+    TapeEngine8 engine8;
+    std::array<std::array<std::atomic<float>*,10>,3> values{};
+    std::atomic<float>* versionValue=nullptr;
+    juce::ValueTree defaults;
+    double sampleRate=44100;
+    int activeVersion=9;
 };
 
 namespace style {
@@ -126,20 +147,28 @@ public:
     explicit TapeEditor(TapeProcessor& p) : AudioProcessorEditor(p), processor(p) {
         setLookAndFeel(&look);
         for(size_t i=0;i<knobs.size();++i) {
-            auto& s=knobs[i]; addAndMakeVisible(s);
-            s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setRotaryParameters(juce::MathConstants<float>::pi*1.25f,juce::MathConstants<float>::pi*2.75f,true);
-            s.setTextBoxStyle(juce::Slider::TextBoxBelow,false,115,23);
-            s.setName(controls::names[i]);
-            s.setTooltip(juce::String(controls::tips[i])+" Double-click to reset.");
-            attachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.state,controls::ids[i],s);
-            s.textFromValueFunction=[i](double v) { return controls::display(static_cast<int>(i),v); };
-            s.valueFromTextFunction=[i](const juce::String& text) { return controls::parse(static_cast<int>(i),text); };
-            s.updateText(); s.setDoubleClickReturnValue(true,.5);
+            auto& slider=knobs[i]; addAndMakeVisible(slider);
+            slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+            slider.setRotaryParameters(juce::MathConstants<float>::pi*1.25f,juce::MathConstants<float>::pi*2.75f,true);
+            slider.setTextBoxStyle(juce::Slider::TextBoxBelow,false,115,23);
         }
-        reset.setButtonText("RESET TO DEFAULT"); reset.setTooltip("Reset all nine parameters to the Airwindows defaults.");
+        selector.setName("Tape version");
+        selector.setTooltip("Choose the original ToTape7, ToTape8 or ToTape9 algorithm. Each version retains its own controls.");
+        selector.addItemList({"ToTape7","ToTape8","ToTape9"},1);
+        selector.setColour(juce::ComboBox::backgroundColourId,style::ink);
+        selector.setColour(juce::ComboBox::textColourId,style::gold);
+        selector.setColour(juce::ComboBox::outlineColourId,style::gold.withAlpha(.4f));
+        addAndMakeVisible(selector);
+        selectorAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,"version",selector);
+        selector.onChange=[this] { if(selector.getSelectedId()>0) bindVersion(selector.getSelectedId()+6); };
+        bindVersion(processor.selectedVersion());
+        reset.setButtonText("RESET TO DEFAULT"); reset.setTooltip("Reset only the selected version to the Airwindows defaults.");
         reset.onClick=[this] {
-            for(auto* parameter:processor.getParameters()) { parameter->beginChangeGesture(); parameter->setValueNotifyingHost(.5f); parameter->endChangeGesture(); }
+            const auto version=processor.selectedVersion();
+            for(int i=0;i<controls::count(version);++i) {
+                auto* parameter=processor.state.getParameter(controls::id(version,i));
+                parameter->beginChangeGesture(); parameter->setValueNotifyingHost(.5f); parameter->endChangeGesture();
+            }
         };
         addAndMakeVisible(reset);
         reset.setColour(juce::TextButton::buttonColourId,style::ink);
@@ -149,9 +178,11 @@ public:
     }
     ~TapeEditor() override { stopTimer(); setLookAndFeel(nullptr); }
     void resized() override {
-        const int top[]{0,1,2,5,8},bottom[]{3,4,6,7};
+        const int top[]{0,1,2,5,8},bottom[]{3,4,6,7,9};
         for(int j=0;j<5;++j) knobs[static_cast<size_t>(top[j])].setBounds(48+j*180,370,164,150);
-        for(int j=0;j<4;++j) knobs[static_cast<size_t>(bottom[j])].setBounds(138+j*180,552,164,150);
+        const auto columns=shownVersion==7?5:4;
+        for(int j=0;j<columns;++j) knobs[static_cast<size_t>(bottom[j])].setBounds((columns==5?48:138)+j*180,552,164,150);
+        selector.setBounds(540,42,180,30);
         reset.setBounds(750,42,180,30);
     }
     void paint(juce::Graphics& g) override {
@@ -160,7 +191,7 @@ public:
         g.setColour(ink); g.setFont(juce::FontOptions(11.f));
         g.drawText("YODO AUDIO    /    AIRWINDOWS DSP",32,17,650,20,juce::Justification::left);
         g.setFont(juce::FontOptions(40.f)); g.drawText("ToTape",30,40,240,55,juce::Justification::left);
-        g.setFont(juce::FontOptions(13.f)); g.drawText("S T U D I O   /   0 9",248,61,300,20,juce::Justification::left);
+        g.setFont(juce::FontOptions(13.f)); g.drawText("S T U D I O   /   0 "+juce::String(shownVersion),248,61,300,20,juce::Justification::left);
         g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343d36),0,108,juce::Colour(0xff1b2420),0,720,false));
         g.fillRoundedRectangle(16,108,948,610,16);
         g.setColour(gold.withAlpha(.2f)); g.drawRoundedRectangle({17.f,109.f,946.f,608.f},15,1);
@@ -176,7 +207,7 @@ public:
         g.setColour(cream.withAlpha(.7f)); g.setFont(juce::FontOptions(10.f));
         g.drawText("STEREO TAPE PROCESSOR",265,173,140,30,juce::Justification::centred);
         g.setColour(gold); g.setFont(juce::FontOptions(32.f));
-        g.drawText("9",285,208,100,44,juce::Justification::centred);
+        g.drawText(juce::String(shownVersion),285,208,100,44,juce::Justification::centred);
         g.setColour(muted); g.setFont(juce::FontOptions(10.f));
         g.drawText("CHRIS JOHNSON",265,263,140,20,juce::Justification::centred);
         g.setColour(gold); g.setFont(juce::FontOptions(11.f));
@@ -187,15 +218,33 @@ public:
         g.drawText("-60                      -24           -12             0",650,270,270,16,juce::Justification::left);
         g.setColour(cream.withAlpha(.12f)); g.drawHorizontalLine(341,49,931);
         g.drawHorizontalLine(533,138,842);
-        const int top[]{0,1,2,5,8},bottom[]{3,4,6,7};
+        const int top[]{0,1,2,5,8},bottom[]{3,4,6,7,9};
         g.setColour(gold); g.setFont(juce::FontOptions(11.f));
-        for(int j=0;j<5;++j) g.drawText(juce::String(controls::names[static_cast<size_t>(top[j])]).toUpperCase(),48+j*180,351,164,22,juce::Justification::centred);
-        for(int j=0;j<4;++j) g.drawText(juce::String(controls::names[static_cast<size_t>(bottom[j])]).toUpperCase(),138+j*180,536,164,22,juce::Justification::centred);
+        for(int j=0;j<5;++j) g.drawText(juce::String(controls::name(shownVersion,top[j])).toUpperCase(),48+j*180,351,164,22,juce::Justification::centred);
+        const auto columns=shownVersion==7?5:4;
+        for(int j=0;j<columns;++j) g.drawText(juce::String(controls::name(shownVersion,bottom[j])).toUpperCase(),(columns==5?48:138)+j*180,536,164,22,juce::Justification::centred);
         g.setColour(ink.withAlpha(.65f)); g.setFont(juce::FontOptions(11.f));
-        g.drawText("ToTape9 by Airwindows  /  Independent studio edition",32,726,710,24,juce::Justification::left);
+        g.drawText("ToTape"+juce::String(shownVersion)+" by Airwindows  /  Independent studio edition",32,726,710,24,juce::Justification::left);
         g.drawText("STEREO  /  FLOAT / DOUBLE",700,726,248,24,juce::Justification::right);
     }
 private:
+    void bindVersion(int version) {
+        if(version==shownVersion) return;
+        for(auto& attachment:attachments) attachment.reset();
+        shownVersion=version;
+        for(int i=0;i<10;++i) {
+            auto& slider=knobs[static_cast<size_t>(i)];
+            slider.setVisible(i<controls::count(version));
+            if(i>=controls::count(version)) continue;
+            slider.setName(controls::name(version,i));
+            slider.setTooltip(juce::String(controls::tip(version,i))+" Double-click to reset.");
+            attachments[static_cast<size_t>(i)]=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.state,controls::id(version,i),slider);
+            slider.textFromValueFunction=[i](double v) { return controls::display(i,v); };
+            slider.valueFromTextFunction=[i](const juce::String& text) { return controls::parse(i,text); };
+            slider.setDoubleClickReturnValue(true,.5); slider.updateText();
+        }
+        resized(); repaint();
+    }
     void drawReel(juce::Graphics& g,float x,float y,float rotation) {
         using namespace style;
         g.setColour(juce::Colours::black.withAlpha(.5f)); g.fillEllipse(x-72,y-67,144,144);
@@ -226,14 +275,18 @@ private:
         g.setColour(style::cream); g.drawText(db<=-60?"-inf":juce::String(db,1),x+208,y,60,20,juce::Justification::right);
     }
     void timerCallback() override {
+        bindVersion(processor.selectedVersion());
         for(int c=0;c<2;++c) levels[c]=juce::jmax(processor.peaks[c].exchange(0,std::memory_order_relaxed),levels[c]*.86f);
         if(juce::jmax(levels[0],levels[1])>.0001f) angle+=.025f;
         repaint(48,139,884,183);
     }
     TapeProcessor& processor;
     style::Look look;
-    std::array<juce::Slider,9> knobs;
-    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,9> attachments;
+    std::array<juce::Slider,10> knobs;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,10> attachments;
+    juce::ComboBox selector;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> selectorAttachment;
+    int shownVersion=0;
     juce::TextButton reset;
     juce::TooltipWindow tooltip{this,600};
     float levels[2]{},angle=0;

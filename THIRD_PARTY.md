@@ -1,13 +1,15 @@
 # Third-party provenance
 
-## Airwindows ToTape9
+## Airwindows ToTape7, ToTape8, and ToTape9
 
 Source: https://github.com/airwindows/airwindows
 Commit: `7fd5f5cae262a41e6dd7d9a83d60c46e84d3092a` (retrieved 2026-11-04).
 Original `plugins/WinVST/ToTape9/ToTape9.h`, `ToTape9.cpp`, `ToTape9Proc.cpp`,
 and repository MIT license are retained unchanged in `third_party/airwindows/`.
+ToTape7 and ToTape8 header, wrapper, and processing sources from the same commit
+are retained unchanged in its `ToTape7/` and `ToTape8/` subdirectories.
 
-`Source/TapeEngine.*` adapts the VST2 wrapper to a standalone C++ engine:
+`Source/TapeEngine.*`, `TapeEngine7.*`, and `TapeEngine8.*` adapt the VST2 wrapper to a standalone C++ engine:
 - The original float/double sample-processing bodies are retained.
 - Initialization is exposed as `reset(sampleRate)`.
 - Per-instance noise seeds are fixed nonzero unsigned values for repeatable tests,
@@ -15,6 +17,13 @@ and repository MIT license are retained unchanged in `third_party/airwindows/`.
   flutter/dither sequences relative to an arbitrary upstream instance.
 - Parameter setters clamp to the normalized 0–1 range.
 - VST2 metadata/chunks are replaced by JUCE parameter automation and XML state.
+
+All three sample-processing bodies are retained verbatim apart from class/type
+names in method signatures. ToTape9 engine files remain unchanged from v0.1.0.
+Version selection routes to exactly one engine, with no added processing or
+crossfade. Each entering engine is reset on version changes. Separate reference
+tests compare each adapted engine to its untouched upstream processing source
+using matched initial seeds.
 
 No VST2 SDK is needed. `tests/shim/audioeffectx.h` is a minimal independently
 written test interface for compiling the original source in reference tests.
