@@ -14,6 +14,7 @@ constexpr std::array<const char*,9> tips{
     "Set the Dubly encode/decode filter shape.","Tape flutter depth. Zero removes modulation.",
     "Tape flutter modulation speed.","Tape bias. 50% is neutral.","Low-frequency head bump amount.",
     "Head bump resonance frequency, 25 to 200 Hz.","Output gain before the original clipping stage. 50% is unity gain."};
+inline juce::String linkId(int version) { return "v"+juce::String(version)+"_linkIO"; }
 inline int count(int version) { return version==7?10:9; }
 inline juce::String id(int version,int index) {
     if(version==9) return ids[static_cast<size_t>(index)];

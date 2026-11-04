@@ -7,6 +7,7 @@
 #include "TapeEngine8.h"
 #include "OutputMeter.h"
 #include "MeterBallistics.h"
+#include "GainLinkAttachment.h"
 
 class TapeProcessor final : public juce::AudioProcessor {
 public:
@@ -32,6 +33,9 @@ public:
         }
         p.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{"version",1},"Tape version",
             juce::StringArray{"ToTape7","ToTape8","ToTape9"},2));
+        for(int version:{8,9})
+            p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{controls::linkId(version),1},
+                "ToTape"+juce::String(version)+" Link Input / Output",false));
         return p;
     }
     int selectedVersion() const { return juce::jlimit(7,9,7+juce::roundToInt(versionValue->load())); }
@@ -159,6 +163,13 @@ public:
             slider.setRotaryParameters(juce::MathConstants<float>::pi*1.25f,juce::MathConstants<float>::pi*2.75f,true);
             slider.setTextBoxStyle(juce::Slider::TextBoxBelow,false,115,23);
         }
+        linkToggle.setButtonText("Link Input / Output");
+        linkToggle.setName("Link Input / Output");
+        linkToggle.setTooltip("Move Output by the opposite gain change when editing Input. Output edits set a new reference. Compensation stops at the output range limits.");
+        linkToggle.setColour(juce::ToggleButton::textColourId,style::ink);
+        linkToggle.setColour(juce::ToggleButton::tickColourId,style::ink);
+        linkToggle.setColour(juce::ToggleButton::tickDisabledColourId,style::ink.withAlpha(.55f));
+        addAndMakeVisible(linkToggle);
         selector.setName("Tape version");
         selector.setTooltip("Choose the original ToTape7, ToTape8 or ToTape9 algorithm. Each version retains its own controls.");
         selector.addItemList({"ToTape7","ToTape8","ToTape9"},1);
@@ -198,6 +209,7 @@ public:
         for(int j=0;j<columns;++j) knobs[static_cast<size_t>(bottom[j])].setBounds((columns==5?48:138)+j*180,552,164,150);
         leftMeter.setBounds(48,139,365,182);
         rightMeter.setBounds(567,139,365,182);
+        linkToggle.setBounds(330,14,200,24);
         selector.setBounds(540,42,180,30);
         reset.setBounds(750,42,180,30);
     }
@@ -241,19 +253,28 @@ public:
 private:
     void bindVersion(int version) {
         if(version==shownVersion) return;
+        gainLinkAttachment.reset();
         for(auto& attachment:attachments) attachment.reset();
         shownVersion=version;
+        linkToggle.setVisible(version!=7);
         for(int i=0;i<10;++i) {
             auto& slider=knobs[static_cast<size_t>(i)];
             slider.setVisible(i<controls::count(version));
             if(i>=controls::count(version)) continue;
             slider.setName(controls::name(version,i));
             slider.setTooltip(juce::String(controls::tip(version,i))+" Double-click to reset.");
-            attachments[static_cast<size_t>(i)]=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.state,controls::id(version,i),slider);
+            if(version==7 || (i!=0 && i!=8))
+                attachments[static_cast<size_t>(i)]=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.state,controls::id(version,i),slider);
             slider.textFromValueFunction=[i](double v) { return controls::display(i,v); };
             slider.valueFromTextFunction=[i](const juce::String& text) { return controls::parse(i,text); };
             slider.setDoubleClickReturnValue(true,.5); slider.updateText();
         }
+        if(version!=7)
+            gainLinkAttachment=std::make_unique<GainLinkAttachment>(
+                *processor.state.getParameter(controls::id(version,0)),
+                *processor.state.getParameter(controls::id(version,8)),
+                *processor.state.getParameter(controls::linkId(version)),
+                knobs[0],knobs[8],linkToggle);
         resized(); repaint();
     }
     void drawReel(juce::Graphics& g,float x,float y,float rotation) {
@@ -296,6 +317,8 @@ private:
     style::Look look;
     std::array<juce::Slider,10> knobs;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,10> attachments;
+    juce::ToggleButton linkToggle;
+    std::unique_ptr<GainLinkAttachment> gainLinkAttachment;
     juce::ComboBox selector;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> selectorAttachment;
     int shownVersion=0;

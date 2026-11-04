@@ -71,12 +71,109 @@ void checkMeterDamping() {
     }
     require(high-low<2.f,"Rapid peaks are not averaged enough");
 }
+struct HostChangeObserver final : juce::AudioProcessorParameter::Listener {
+    int values=0,begins=0,ends=0;
+    void parameterValueChanged(int,float) override { ++values; }
+    void parameterGestureChanged(int,bool starting) override { if(starting) ++begins; else ++ends; }
+};
+void checkGainLink() {
+    std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
+    std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditor());
+    juce::ComboBox* selector=nullptr; juce::ToggleButton* link=nullptr;
+    for(auto* child:editor->getChildren()) {
+        if(auto* combo=dynamic_cast<juce::ComboBox*>(child)) selector=combo;
+        if(auto* toggle=dynamic_cast<juce::ToggleButton*>(child)) link=toggle;
+    }
+    require(selector && link,"Missing input/output link control");
+    auto slider=[&](const juce::String& name) {
+        for(auto* child:editor->getChildren()) if(auto* v=dynamic_cast<juce::Slider*>(child);v && v->getName()==name) return v;
+        throw std::runtime_error("Slider not found");
+    };
+    auto close=[](double a,double b) { return std::abs(a-b)<1.e-6; };
+    for(int version:{8,9}) {
+        selector->setSelectedId(version-6,juce::sendNotificationSync);
+        require(link->isVisible() && !link->getToggleState(),"Link must default to off separately for each version");
+        require(editor->getLocalBounds().contains(link->getBounds()),"Link outside editor");
+        auto* input=slider("Input"); auto* output=slider("Output");
+        input->setValue(.5,juce::sendNotificationSync); output->setValue(.5,juce::sendNotificationSync);
+        link->setToggleState(true,juce::sendNotificationSync);
+        require(parameter(*p,controls::linkId(version)).getValue()>.5f,"Link toggle not saved as a parameter");
+        require(close(input->getValue(),.5) && close(output->getValue(),.5),"Enabling link changes the gain");
+        HostChangeObserver inputEvents,outputEvents;
+        auto& inputParameter=parameter(*p,controls::id(version,0));
+        auto& outputParameter=parameter(*p,controls::id(version,8));
+        inputParameter.addListener(&inputEvents); outputParameter.addListener(&outputEvents);
+        input->setValue(1,juce::sendNotificationSync);
+        inputParameter.removeListener(&inputEvents); outputParameter.removeListener(&outputEvents);
+        require(inputEvents.values>0 && outputEvents.values>0 && inputEvents.begins==1 && inputEvents.ends==1 && outputEvents.begins==1 && outputEvents.ends==1,"Linked edits not reported as balanced host gestures");
+        require(close(output->getValue(),.125),"Linked output does not compensate squared input gain");
+        require(close(parameter(*p,controls::id(version,8)).getValue(),.125),"Compensated output not sent to host");
+        input->setValue(.25,juce::sendNotificationSync);
+        require(close(output->getValue(),1),"Output range not respected");
+        input->setValue(.5,juce::sendNotificationSync);
+        require(close(output->getValue(),.5),"Clamping lost the original reference");
+        input->setValue(input->getValueFromText("75 %"),juce::sendNotificationSync);
+        require(close(output->getValue(),2.0/9.0),"Typed input value is not gain linked");
+        // The same value path is used by the configured double-click reset.
+        input->setValue(.5,juce::sendNotificationSync);
+        require(close(output->getValue(),.5),"Input reset is not gain linked");
+        output->setValue(.25,juce::sendNotificationSync);
+        input->setValue(1,juce::sendNotificationSync);
+        require(close(output->getValue(),.0625),"Manual output edit did not set a new reference");
+        // Automation/state changes must not generate unintended paired writes.
+        parameter(*p,controls::id(version,0)).setValueNotifyingHost(.75f);
+        require(close(output->getValue(),.0625),"Input automation rewrites output automation");
+        input->setValue(.5,juce::sendNotificationSync);
+        require(close(output->getValue(),.140625),"UI editing after automation uses a stale reference");
+        link->setToggleState(false,juce::sendNotificationSync);
+        input->setValue(.8,juce::sendNotificationSync);
+        require(close(output->getValue(),.140625),"Unlinked input changes output");
+        input->setValue(0,juce::sendNotificationSync); output->setValue(.5,juce::sendNotificationSync);
+        link->setToggleState(true,juce::sendNotificationSync);
+        input->setValue(.5,juce::sendNotificationSync);
+        require(close(output->getValue(),.5),"Linking at mute is not stable");
+        input->setValue(0,juce::sendNotificationSync);
+        require(close(output->getValue(),1),"Muted input does not clamp safely");
+        input->setValue(.5,juce::sendNotificationSync);
+        require(close(output->getValue(),.5),"Recovery from muted input lost the reference");
+        output->setValue(0,juce::sendNotificationSync); input->setValue(1,juce::sendNotificationSync);
+        require(close(output->getValue(),0),"Output mute not preserved");
+        output->setValue(.3,juce::sendNotificationSync); input->setValue(.5,juce::sendNotificationSync);
+        require(close(output->getValue(),1),"Manual output reanchoring does not clamp");
+        input->setValue(1,juce::sendNotificationSync);
+        require(close(output->getValue(),.3),"Manual output reference not retained after clamping");
+    }
+    selector->setSelectedId(1,juce::sendNotificationSync);
+    require(!link->isVisible(),"ToTape7 must not expose input/output linking");
+    selector->setSelectedId(3,juce::sendNotificationSync);
+    require(link->getToggleState(),"Link preference lost on version switch");
+    juce::MemoryBlock saved; p->getStateInformation(saved);
+    // Restore with the editor open, so attachment callbacks are exercised too.
+    parameter(*p,controls::linkId(8)).setValueNotifyingHost(0);
+    parameter(*p,controls::linkId(9)).setValueNotifyingHost(0);
+    parameter(*p,"input").setValueNotifyingHost(.2f);
+    p->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));
+    require(parameter(*p,controls::linkId(8)).getValue()>.5f && parameter(*p,controls::linkId(9)).getValue()>.5f,"Link states not recalled independently");
+    require(close(parameter(*p,"input").getValue(),1) && close(parameter(*p,"output").getValue(),.3),"Recall applies gain compensation a second time");
+    // Migrate a previous multi-version state that predates the link parameters.
+    auto xml=juce::AudioProcessor::getXmlFromBinary(saved.getData(),static_cast<int>(saved.getSize()));
+    auto old=juce::ValueTree::fromXml(*xml);
+    for(int i=old.getNumChildren();--i>=0;) if(old.getChild(i).getProperty("id").toString().endsWith("_linkIO")) old.removeChild(i,nullptr);
+    juce::MemoryBlock oldBytes; auto oldXml=old.createXml(); juce::AudioProcessor::copyXmlToBinary(*oldXml,oldBytes);
+    p->setStateInformation(oldBytes.getData(),static_cast<int>(oldBytes.getSize()));
+    require(parameter(*p,controls::linkId(8)).getValue()<.5f && parameter(*p,controls::linkId(9)).getValue()<.5f,"Old sessions must restore with linking off");
+    parameter(*p,controls::linkId(8)).setValueNotifyingHost(1);
+    parameter(*p,controls::linkId(9)).setValueNotifyingHost(1);
+    compare<TapeEngine8,float>(*p,8,48000); compare<TapeEngine8,double>(*p,8,48000);
+    compare<TapeEngine,float>(*p,9,48000); compare<TapeEngine,double>(*p,9,48000);
+}
 int main() {
     try {
         checkMeterDamping();
         juce::ScopedJuceInitialiser_GUI init;
+        checkGainLink();
         std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
-        require(p->getParameters().size()==29 && p->hasEditor(),"Missing parameter banks/editor");
+        require(p->getParameters().size()==31 && p->hasEditor(),"Missing parameter banks/editor");
         require(parameter(*p,"version").getValue()==1.f,"Default must remain ToTape9");
         for(int i=0;i<9;++i) {
             require(dynamic_cast<juce::AudioProcessorParameterWithID*>(p->getParameters()[i])->paramID==controls::id(9,i),"Legacy parameter order changed");
@@ -158,13 +255,13 @@ int main() {
         juce::MemoryBlock saved; p->getStateInformation(saved);
         std::unique_ptr<juce::AudioProcessor> restored(createPluginFilter());
         restored->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));
-        for(int i=0;i<29;++i) require(restored->getParameters()[i]->getValue()==p->getParameters()[i]->getValue(),"State recall lost version or bank values");
+        for(int i=0;i<31;++i) require(restored->getParameters()[i]->getValue()==p->getParameters()[i]->getValue(),"State recall lost version or bank values");
         // A real legacy-shaped state must select ToTape9 even over a current ToTape7 session.
         auto xml=juce::AudioProcessor::getXmlFromBinary(saved.getData(),static_cast<int>(saved.getSize()));
         auto legacy=juce::ValueTree::fromXml(*xml);
         for(int i=legacy.getNumChildren();--i>=0;) {
             auto id=legacy.getChild(i).getProperty("id").toString();
-            if(id=="version" || id.startsWith("v7_") || id.startsWith("v8_")) legacy.removeChild(i,nullptr);
+            if(id=="version" || id.startsWith("v7_") || id.startsWith("v8_") || id.endsWith("_linkIO")) legacy.removeChild(i,nullptr);
         }
         juce::MemoryBlock legacyBytes; auto legacyXml=legacy.createXml();
         juce::AudioProcessor::copyXmlToBinary(*legacyXml,legacyBytes);

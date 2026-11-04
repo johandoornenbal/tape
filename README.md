@@ -38,6 +38,22 @@ Switch at a quiet point or with playback stopped to avoid an audible discontinui
 | Head frequency | 25–200 Hz | Resonance frequency; default 68.75 Hz |
 | Output | 0–100% | Original output gain before the clipping stage; 50% = unity |
 
+**Link Input / Output (ToTape8 and ToTape9):** Enable the checkbox to have Input
+knob edits move Output by the opposite gain change. The link preserves your
+current gain balance: for example, Input from 50% to 100% adds about 12 dB and
+moves Output from 50% to 12.5% to compensate. Output edits establish a new
+reference. Each version remembers its own link setting; linking defaults to off.
+Compensation clamps to Output's original range and recovers the reference when
+Input returns within range. At zero Input no finite inverse exists; enabling the
+link there establishes its reference on the first positive Input setting.
+
+Linking applies to editor edits, including typed values and double-click reset.
+Both parameter changes are reported to the host, so recording a linked movement
+records Input and Output automation. Automation playback, generic host controls,
+and state recall retain their independent parameter values and do not apply
+compensation a second time. This is gain linking, not loudness matching: tape
+saturation can still change perceived volume. The original DSP is unchanged.
+
 **ToTape7 controls:** Encode amount, Encode frequency, Tape drive, Flutter,
 Flutter speed, Bias, Head bump, Head frequency, Decode amount, and Decode
 frequency. All except Head frequency use normalized 0–100% displays, preserving
@@ -108,7 +124,8 @@ suites compile the untouched upstream processing source behind a small test-only
 VST2 interface and compare float/double processing including silence and parameter
 changes. Both implementations use the same deterministic dither seeds.
 The JUCE wrapper check verifies all three banks and their selector/slider bindings,
-independent reset, state recall, legacy ToTape9 migration, float/double routing,
+independent reset, input/output gain linking and host gestures, state recall,
+legacy state migration, float/double routing,
 host latency, and rendering each native editor. It writes `ui-preview.png`,
 `ui-preview-7.png`, and `ui-preview-8.png` in the build directory.
 
