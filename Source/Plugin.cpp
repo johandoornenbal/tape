@@ -6,6 +6,7 @@
 #include "TapeEngine7.h"
 #include "TapeEngine8.h"
 #include "OutputMeter.h"
+#include "MeterBallistics.h"
 
 class TapeProcessor final : public juce::AudioProcessor {
 public:
@@ -34,9 +35,11 @@ public:
         return p;
     }
     int selectedVersion() const { return juce::jlimit(7,9,7+juce::roundToInt(versionValue->load())); }
-    void prepareToPlay(double rate,int) override {
+    void prepareToPlay(double rate,int blockSize) override {
         sampleRate=rate; engine.reset(rate); engine7.reset(rate); engine8.reset(rate);
         activeVersion=selectedVersion(); setLatencySamples(1); peaks[0]=0; peaks[1]=0;
+        meterTimeoutSeconds.store(juce::jmax(.15,2.0*blockSize/rate),std::memory_order_relaxed);
+        meterSequence.fetch_add(1,std::memory_order_release);
     }
     template<class Engine,class T> void render(Engine& e,juce::AudioBuffer<T>& b,int version) {
         for(int i=0;i<controls::count(version);++i) e.setParameter(i,values[static_cast<size_t>(version-7)][static_cast<size_t>(i)]->load());
@@ -44,7 +47,7 @@ public:
         if constexpr (std::is_same_v<T,float>) e.processReplacing(data,data,b.getNumSamples());
         else e.processDoubleReplacing(data,data,b.getNumSamples());
     }
-    void releaseResources() override { peaks[0]=0; peaks[1]=0; }
+    void releaseResources() override { peaks[0]=0; peaks[1]=0; meterSequence.fetch_add(1,std::memory_order_release); }
     bool isBusesLayoutSupported(const BusesLayout& b) const override {
         return b.getMainInputChannelSet()==juce::AudioChannelSet::stereo()
             && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo();
@@ -68,6 +71,7 @@ public:
             auto old=peaks[c].load(std::memory_order_relaxed);
             while(old<peak && !peaks[c].compare_exchange_weak(old,peak,std::memory_order_relaxed)) {}
         }
+        meterSequence.fetch_add(1,std::memory_order_release);
     }
     void processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { process(b); }
     void processBlock(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { process(b); }
@@ -101,6 +105,8 @@ public:
     }
     juce::AudioProcessorValueTreeState state;
     std::atomic<float> peaks[2]{};
+    std::atomic<uint32_t> meterSequence{0};
+    std::atomic<double> meterTimeoutSeconds{.15};
 private:
     TapeEngine engine;
     TapeEngine7 engine7;
@@ -175,9 +181,14 @@ public:
         reset.setColour(juce::TextButton::buttonColourId,style::ink);
         reset.setColour(juce::TextButton::textColourOffId,style::gold);
         addAndMakeVisible(leftMeter); addAndMakeVisible(rightMeter);
-        for(int c=0;c<2;++c) levels[c]=processor.peaks[c].load(std::memory_order_relaxed);
-        leftMeter.setPeak(levels[0]); rightMeter.setPeak(levels[1]);
-        setSize(980,760); startTimerHz(30);
+        lastMeterSequence=processor.meterSequence.load(std::memory_order_acquire);
+        for(int c=0;c<2;++c) {
+            targets[static_cast<size_t>(c)]=processor.peaks[c].exchange(0,std::memory_order_relaxed);
+            ballistics[static_cast<size_t>(c)].resetPeak(targets[static_cast<size_t>(c)]);
+        }
+        leftMeter.setLevelDb(ballistics[0].getLevelDb()); rightMeter.setLevelDb(ballistics[1].getLevelDb());
+        lastMeterTime=juce::Time::getMillisecondCounterHiRes();
+        setSize(980,760); startTimerHz(60);
     }
     ~TapeEditor() override { stopTimer(); setLookAndFeel(nullptr); }
     void resized() override {
@@ -264,9 +275,20 @@ private:
     }
     void timerCallback() override {
         bindVersion(processor.selectedVersion());
-        for(int c=0;c<2;++c) levels[c]=juce::jmax(processor.peaks[c].exchange(0,std::memory_order_relaxed),levels[c]*.86f);
-        leftMeter.setPeak(levels[0]); rightMeter.setPeak(levels[1]);
-        if(juce::jmax(levels[0],levels[1])>.0001f) angle+=.025f;
+        const auto now=juce::Time::getMillisecondCounterHiRes();
+        const auto elapsed=(now-lastMeterTime)*.001;
+        lastMeterTime=now;
+        const auto sequence=processor.meterSequence.load(std::memory_order_acquire);
+        if(sequence!=lastMeterSequence) {
+            lastMeterSequence=sequence; idleSeconds=0;
+            for(int c=0;c<2;++c) targets[static_cast<size_t>(c)]=processor.peaks[c].exchange(0,std::memory_order_relaxed);
+        } else {
+            idleSeconds+=elapsed;
+            if(idleSeconds>processor.meterTimeoutSeconds.load(std::memory_order_relaxed)) targets.fill(0);
+        }
+        for(size_t c=0;c<2;++c) ballistics[c].advance(targets[c],elapsed);
+        leftMeter.setLevelDb(ballistics[0].getLevelDb()); rightMeter.setLevelDb(ballistics[1].getLevelDb());
+        if(juce::jmax(ballistics[0].getLevelDb(),ballistics[1].getLevelDb())>-59.95f) angle+=static_cast<float>(.75*elapsed);
         repaint(48,139,884,183);
     }
     OutputMeter leftMeter{"LEFT"},rightMeter{"RIGHT"};
@@ -279,7 +301,11 @@ private:
     int shownVersion=0;
     juce::TextButton reset;
     juce::TooltipWindow tooltip{this,600};
-    float levels[2]{},angle=0;
+    std::array<MeterBallistics,2> ballistics;
+    std::array<float,2> targets{};
+    uint32_t lastMeterSequence=0;
+    double lastMeterTime=0,idleSeconds=0;
+    float angle=0;
 };
 juce::AudioProcessorEditor* TapeProcessor::createEditor() { return new TapeEditor(*this); }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new TapeProcessor; }

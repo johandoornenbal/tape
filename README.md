@@ -50,8 +50,11 @@ not Hz readouts. Tape drive at 50% is unity. ToTape7 has no separate Output knob
 
 Stereo input/output; 32- and 64-bit floating-point processing. The output meters
 use illuminated analogue faces, red needles and a −60 to 0 dBFS scale, styled
-after ButterComp Studio. They show stereo sample peaks after processing, with
-visual decay and a −60 dBFS floor. They are not VU, loudness, or true-peak meters. Reel motion is decorative
+after ButterComp Studio. They show smoothed stereo sample peaks after processing, with a −60 dBFS floor.
+The displayed dB values and needles use a 120 ms attack and 450 ms release
+time constant at 60 frames per second. Damping follows elapsed time, so timer
+jitter does not change the response. Short peaks are deliberately averaged in
+the display; audio processing is unaffected. They are not VU, loudness, or true-peak meters. Reel motion is decorative
 and follows signal activity, not simulated physical tape speed. The original output stages are retained:
 ClipOnly2 for ToTape7/8, ClipOnly3 for ToTape9. One sample of small-signal latency is reported
 to the host; flutter additionally introduces its original variable delay.

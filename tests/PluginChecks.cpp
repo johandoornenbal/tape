@@ -4,6 +4,7 @@
 #include "../Source/TapeEngine7.h"
 #include "../Source/TapeEngine8.h"
 #include "../Source/OutputMeter.h"
+#include "../Source/MeterBallistics.h"
 #include <iostream>
 #include <stdexcept>
 void require(bool ok,const char* message) { if(!ok) throw std::runtime_error(message); }
@@ -45,8 +46,34 @@ void savePreview(juce::AudioProcessorEditor& editor,int version) {
     require(out!=nullptr,"Cannot save preview"); out->setPosition(0); out->truncate();
     require(juce::PNGImageFormat().writeImageToStream(image,*out),"PNG render failed");
 }
+void checkMeterDamping() {
+    MeterBallistics meter;
+    require(meter.advance(1.f,1.0/60)<-40.f,"Needle jumps immediately on a peak");
+    for(int i=0;i<90;++i) meter.advance(.5f,1.0/60);
+    require(std::abs(meter.getLevelDb()+6.0206f)<.05f,"Steady-level meter calibration changed");
+    const auto before=meter.getLevelDb();
+    meter.advance(0,1.0/60);
+    require(meter.getLevelDb()<before && meter.getLevelDb()>before-3.f,"Needle release is abrupt");
+    for(int i=0;i<360;++i) meter.advance(0,1.0/60);
+    require(meter.getLevelDb()<=-60.f,"Stopped meter does not return to rest");
+    // Equal elapsed time must give the same response despite UI timer jitter.
+    MeterBallistics regular,jittered;
+    for(int i=0;i<60;++i) regular.advance(.5f,1.0/60);
+    for(int i=0;i<20;++i) { jittered.advance(.5f,.01); jittered.advance(.5f,.04); }
+    require(std::abs(regular.getLevelDb()-jittered.getLevelDb())<1.e-4f,"Damping depends on timer cadence");
+    // Alternating peaks should produce much less needle swing than their raw 12 dB range.
+    MeterBallistics fluctuating;
+    fluctuating.resetPeak(.5f);
+    float low=0,high=-60;
+    for(int i=0;i<240;++i) {
+        auto db=fluctuating.advance(i%2==0?.25f:1.f,1.0/60);
+        if(i>120) { low=std::min(low,db); high=std::max(high,db); }
+    }
+    require(high-low<2.f,"Rapid peaks are not averaged enough");
+}
 int main() {
     try {
+        checkMeterDamping();
         juce::ScopedJuceInitialiser_GUI init;
         std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
         require(p->getParameters().size()==29 && p->hasEditor(),"Missing parameter banks/editor");

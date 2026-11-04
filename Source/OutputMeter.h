@@ -6,11 +6,14 @@ class OutputMeter final : public juce::Component {
 public:
     explicit OutputMeter(juce::String channelName) : channel(std::move(channelName)) {
         setTitle("Output level " + channel);
-        setDescription("Post-tape sample peak in dBFS, with visual decay; not a VU or gain reduction meter");
+        setDescription("Post-tape sample peak in dBFS, with a damped needle; not a VU or gain reduction meter");
         setAccessible(true);
     }
     void setPeak(float linearPeak) {
-        db=juce::Decibels::gainToDecibels(juce::jmax(0.f,linearPeak),-60.f);
+        setLevelDb(juce::Decibels::gainToDecibels(juce::jmax(0.f,linearPeak),-60.f));
+    }
+    void setLevelDb(float levelDb) {
+        db=juce::jmax(-60.f,levelDb);
         repaint();
     }
     float getLevelDb() const { return db; }
