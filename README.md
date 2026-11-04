@@ -2,8 +2,7 @@
 
 A native UI for **Airwindows ToTape7, ToTape8, and ToTape9**, following the cream, charcoal, and brass
 style of [ButterComp Studio](https://github.com/johandoornenbal/codex-tryout).
-Built with JUCE for **VST3 + standalone on Linux, Windows, and macOS**, and
-**Audio Unit on macOS**. This is an independent adaptation, not an official
+Built with JUCE as a **VST3 for Apple Silicon Macs (M2 and newer)**. This is an independent adaptation, not an official
 Airwindows release.
 
 ![Native plugin editor](docs/ui-preview.png)
@@ -58,50 +57,38 @@ ClipOnly2 for ToTape7/8, ClipOnly3 for ToTape9. One sample of small-signal laten
 to the host; flutter additionally introduces its original variable delay.
 Parameters are sampled once per audio block, as in the original plugin.
 
-## Build
+## Build on your Mac
 
-Requires CMake 3.22+, a C++17 compiler, and Git. The first configure fetches
-JUCE 8.0.12 at a pinned commit. An existing copy can be supplied with
-`-DJUCE_PATH=/absolute/path/to/JUCE`.
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel 3
-ctest --test-dir build -C Release --output-on-failure
-```
-
-Outputs are under `build/ToTapeStudio_artefacts/Release/`:
-
-- `VST3/ToTape Studio.vst3`
-- `Standalone/ToTape Studio` (`.app` on macOS, `.exe` on Windows)
-- `AU/ToTape Studio.component` (macOS only)
-
-**macOS:** Install Xcode Command Line Tools and CMake. For Apple Silicon, add
-`-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0` when configuring.
-Use `"arm64;x86_64"` for a universal build with an appropriate SDK. Copy the VST3
-to `~/Library/Audio/Plug-Ins/VST3/` or AU to `~/Library/Audio/Plug-Ins/Components/`.
-Logic Pro uses AU. Local builds may need ad-hoc signing, for example:
+Install Xcode Command Line Tools (`xcode-select --install`) and CMake 3.22+
+(for example, `brew install cmake`). From the repository root:
 
 ```sh
-codesign --force --deep --sign - "build/ToTapeStudio_artefacts/Release/AU/ToTape Studio.component"
+cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+cmake --build build-mac --config Release --parallel 3
+ctest --test-dir build-mac -C Release --output-on-failure
 ```
 
-Distribution requires appropriate signing/notarization and license compliance.
+The first configure downloads pinned JUCE 8.0.12. An existing copy can be supplied
+with `-DJUCE_PATH=/absolute/path/to/JUCE`.
 
-**Windows:** Use Visual Studio 2022 with Desktop development with C++, plus
-CMake and Git. Run the build commands from a Developer PowerShell. Copy the VST3
-bundle to `C:\Program Files\Common Files\VST3\` or a host-supported user location.
+The output is `build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3`.
+To install locally:
 
-**Linux (Debian/Ubuntu):** Install `build-essential cmake git pkg-config
-libasound2-dev libfreetype-dev libfontconfig-dev libx11-dev libxext-dev
-libxinerama-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev`. WebKit and curl
-are not required. For this managed Debian cloud instance, use
-`bash scripts/setup-cloud.sh`, then `source scripts/cloud-env.sh` in new shells.
-The script installs dependencies in `/workspace`, preserving system and repository
-source files. Copy the VST3 bundle to `~/.vst3/` to use it in a Linux host.
+```sh
+codesign --force --deep --sign - "build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3"
+mkdir -p "$HOME/Library/Audio/Plug-Ins/VST3"
+ditto "build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3" \
+  "$HOME/Library/Audio/Plug-Ins/VST3/ToTape Studio.vst3"
+```
 
-For the standalone app, select your audio device in its Audio/MIDI settings and
-feed stereo input. Monitor at a suitable level to avoid feedback through speakers.
+Restart or rescan plugins in your VST3-compatible DAW. Logic Pro requires Audio
+Unit and cannot load this VST3 build. Ad-hoc signing is for local use;
+distribution requires appropriate Developer ID signing and notarization.
+
+GitHub Actions builds and tests the arm64 VST3 on macOS, ad-hoc signs the bundle,
+and uploads `ToTape-Studio-macOS-arm64.zip`. The archive contains only the VST3
+bundle, matching ButterComp's build setup.
 
 ## Checks
 
@@ -122,9 +109,10 @@ independent reset, state recall, legacy ToTape9 migration, float/double routing,
 host latency, and rendering each native editor. It writes `ui-preview.png`,
 `ui-preview-7.png`, and `ui-preview-8.png` in the build directory.
 
-CI is configured for Linux, Windows, and macOS, with build artifacts uploaded for
-each platform. Creating the workflow does not run it; native macOS/Windows builds
-and DAW playback/automation validation remain necessary before release.
+The managed Linux cloud instance remains available for development validation:
+run `bash scripts/setup-cloud.sh`, then `source scripts/cloud-env.sh` in new
+shells. It builds a Linux VST3 for checks; the release workflow produces the
+macOS arm64 VST3. AU and standalone targets are not built.
 
 ## Licenses
 
@@ -134,9 +122,9 @@ license does not relicense JUCE. See [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Verified in this cloud instance
 
-Linux VST3 and standalone builds passed. All seven CTest suites passed: 63 DSP
+Linux VST3 compilation passed. All seven CTest suites passed: 63 DSP
 scenarios, 144 upstream comparisons with maximum absolute error 0, and the JUCE
-wrapper/editor checks for all three versions. The standalone window opened on a virtual X display.
+wrapper/editor checks for all three versions.
 No physical audio device is available here; audio checks render test buffers.
-The screenshot above comes from the actual editor. macOS AU/VST3 and Windows
-builds, signing, and DAW playback have not been executed in this Linux instance.
+The screenshot above comes from the actual editor. Native macOS compilation,
+signing, and DAW playback have not been executed in this Linux instance.

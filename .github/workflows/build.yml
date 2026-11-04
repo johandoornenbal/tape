@@ -1,41 +1,23 @@
-name: Build plugins
+name: Build Apple Silicon VST3
 on: [push, pull_request, workflow_dispatch]
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2022, macos-15]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Linux development libraries
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfreetype-dev libfontconfig-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev xvfb
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Check Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Configure Apple Silicon
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
       - name: Build
         run: cmake --build build --config Release --parallel 3
-      - name: Test Linux
-        if: runner.os == 'Linux'
-        run: xvfb-run -a ctest --test-dir build -C Release --output-on-failure
-      - name: Test macOS / Windows
-        if: runner.os != 'Linux'
+      - name: Test DSP, state and editor
         run: ctest --test-dir build -C Release --output-on-failure
-      - name: Ad-hoc sign macOS bundles
-        if: runner.os == 'macOS'
+      - name: Ad-hoc sign and archive
         run: |
           codesign --force --deep --sign - "build/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3"
-          codesign --force --deep --sign - "build/ToTapeStudio_artefacts/Release/AU/ToTape Studio.component"
-          codesign --force --deep --sign - "build/ToTapeStudio_artefacts/Release/Standalone/ToTape Studio.app"
-          ditto -c -k --sequesterRsrc --keepParent build/ToTapeStudio_artefacts/Release ToTape-Studio-macOS.zip
+          ditto -c -k --sequesterRsrc --keepParent "build/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3" ToTape-Studio-macOS-arm64.zip
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'macOS'
         with:
-          name: ToTape-Studio-macOS
-          path: ToTape-Studio-macOS.zip
-      - uses: actions/upload-artifact@v4
-        if: runner.os != 'macOS'
-        with:
-          name: ToTape-Studio-${{ runner.os }}
-          path: build/ToTapeStudio_artefacts/Release/
+          name: ToTape-Studio-macOS-arm64
+          path: ToTape-Studio-macOS-arm64.zip
