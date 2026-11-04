@@ -3,6 +3,7 @@
 #include "../Source/TapeEngine.h"
 #include "../Source/TapeEngine7.h"
 #include "../Source/TapeEngine8.h"
+#include "../Source/OutputMeter.h"
 #include <iostream>
 #include <stdexcept>
 void require(bool ok,const char* message) { if(!ok) throw std::runtime_error(message); }
@@ -80,9 +81,26 @@ int main() {
                 require(switched.getSample(c,i)==expected.getSample(c,i),"Switch did not route to a freshly reset original engine");
         }
         p->releaseResources();
+        // Publish unequal real output peaks before opening the editor.
+        p->prepareToPlay(48000,64);
+        juce::AudioBuffer<double> meterAudio(2,64);
+        for(int i=0;i<64;++i) { meterAudio.setSample(0,i,.35*std::sin(i*.08)); meterAudio.setSample(1,i,.07*std::sin(i*.08)); }
+        p->processBlock(meterAudio,midi);
+        const float expectedMeterDb[]{
+            juce::Decibels::gainToDecibels(static_cast<float>(meterAudio.getMagnitude(0,0,64)),-60.f),
+            juce::Decibels::gainToDecibels(static_cast<float>(meterAudio.getMagnitude(1,0,64)),-60.f)};
         // Actual UI selector, independent bank bindings, and selected-bank reset.
         std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditor());
         require(editor->getWidth()==980 && editor->getHeight()==760,"Wrong editor size");
+        int meterCount=0;
+        for(auto* child:editor->getChildren()) if(auto* meter=dynamic_cast<OutputMeter*>(child)) {
+            const int channel=meter->getTitle().endsWith("LEFT")?0:1;
+            require(editor->getLocalBounds().contains(meter->getBounds()),"Meter outside editor");
+            require(std::abs(meter->getLevelDb()-expectedMeterDb[channel])<1.e-5f,"Analogue meter does not match actual channel output");
+            ++meterCount;
+        }
+        require(meterCount==2,"Missing stereo analogue meters");
+        p->releaseResources();
         juce::ComboBox* selector=nullptr; juce::TextButton* reset=nullptr;
         for(auto* child:editor->getChildren()) {
             if(auto* combo=dynamic_cast<juce::ComboBox*>(child)) selector=combo;

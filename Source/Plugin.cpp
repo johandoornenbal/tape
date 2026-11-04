@@ -5,6 +5,7 @@
 #include "TapeControls.h"
 #include "TapeEngine7.h"
 #include "TapeEngine8.h"
+#include "OutputMeter.h"
 
 class TapeProcessor final : public juce::AudioProcessor {
 public:
@@ -173,7 +174,9 @@ public:
         addAndMakeVisible(reset);
         reset.setColour(juce::TextButton::buttonColourId,style::ink);
         reset.setColour(juce::TextButton::textColourOffId,style::gold);
+        addAndMakeVisible(leftMeter); addAndMakeVisible(rightMeter);
         for(int c=0;c<2;++c) levels[c]=processor.peaks[c].load(std::memory_order_relaxed);
+        leftMeter.setPeak(levels[0]); rightMeter.setPeak(levels[1]);
         setSize(980,760); startTimerHz(30);
     }
     ~TapeEditor() override { stopTimer(); setLookAndFeel(nullptr); }
@@ -182,6 +185,8 @@ public:
         for(int j=0;j<5;++j) knobs[static_cast<size_t>(top[j])].setBounds(48+j*180,370,164,150);
         const auto columns=shownVersion==7?5:4;
         for(int j=0;j<columns;++j) knobs[static_cast<size_t>(bottom[j])].setBounds((columns==5?48:138)+j*180,552,164,150);
+        leftMeter.setBounds(48,139,365,182);
+        rightMeter.setBounds(567,139,365,182);
         selector.setBounds(540,42,180,30);
         reset.setBounds(750,42,180,30);
     }
@@ -199,23 +204,18 @@ public:
             g.setColour(juce::Colour(0xff111a15)); g.fillEllipse(x-4,y-4,8,8);
             g.setColour(juce::Colour(0xff646c5b)); g.drawLine(x-2,y+1,x+2,y-1,1);
         }
-        // Recessed transport window, with two vector-drawn tape reels.
-        g.setColour(juce::Colour(0xff101713)); g.fillRoundedRectangle(48,139,568,182,10);
-        g.setColour(cream.withAlpha(.08f)); g.drawRoundedRectangle({49.f,140.f,566.f,180.f},9,1);
-        g.setColour(gold.withAlpha(.4f)); g.drawLine(196,279,468,279,3);
-        drawReel(g,190,226,angle); drawReel(g,474,226,angle);
-        g.setColour(cream.withAlpha(.7f)); g.setFont(juce::FontOptions(10.f));
-        g.drawText("STEREO TAPE PROCESSOR",265,173,140,30,juce::Justification::centred);
-        g.setColour(gold); g.setFont(juce::FontOptions(32.f));
-        g.drawText(juce::String(shownVersion),285,208,100,44,juce::Justification::centred);
-        g.setColour(muted); g.setFont(juce::FontOptions(10.f));
-        g.drawText("CHRIS JOHNSON",265,263,140,20,juce::Justification::centred);
+        // Compact tape transport between the two illuminated analogue output meters.
+        g.setColour(juce::Colour(0xff101713)); g.fillRoundedRectangle(426,139,128,182,10);
         g.setColour(gold); g.setFont(juce::FontOptions(11.f));
-        g.drawText("OUTPUT LEVEL",650,149,270,22,juce::Justification::left);
-        drawMeter(g,0,650,190); drawMeter(g,1,650,233);
+        g.drawText("ToTape"+juce::String(shownVersion),426,153,128,22,juce::Justification::centred);
+        {
+            juce::Graphics::ScopedSaveState transport(g);
+            g.addTransform(juce::AffineTransform::scale(.36f).translated(452,215));
+            drawReel(g,0,0,angle); drawReel(g,210,0,angle);
+        }
         g.setColour(muted); g.setFont(juce::FontOptions(10.f));
-        g.drawText("PEAK  /  dBFS",650,285,270,18,juce::Justification::left);
-        g.drawText("-60                      -24           -12             0",650,270,270,16,juce::Justification::left);
+        g.drawText("STEREO",426,256,128,18,juce::Justification::centred);
+        g.drawText("SAMPLE PEAK",426,275,128,18,juce::Justification::centred);
         g.setColour(cream.withAlpha(.12f)); g.drawHorizontalLine(341,49,931);
         g.drawHorizontalLine(533,138,842);
         const int top[]{0,1,2,5,8},bottom[]{3,4,6,7,9};
@@ -262,24 +262,14 @@ private:
         g.setColour(gold); g.drawEllipse(x-13,y-13,26,26,2);
         g.setColour(cream); g.fillEllipse(x-4,y-4,8,8);
     }
-    void drawMeter(juce::Graphics& g,int c,int x,int y) {
-        const auto db=juce::Decibels::gainToDecibels(levels[c],-60.f);
-        g.setColour(style::cream.withAlpha(.8f)); g.setFont(juce::FontOptions(10.f));
-        g.drawText(c==0?"L":"R",x,y,15,20,juce::Justification::left);
-        for(int i=0;i<30;++i) {
-            const bool active=db>-60.f+static_cast<float>(i)*2.f;
-            auto colour=i>26?juce::Colour(0xffd37755):style::gold;
-            g.setColour(colour.withAlpha(active?1.f:.12f));
-            g.fillRoundedRectangle(static_cast<float>(x+20+i*6),static_cast<float>(y),4,17,1);
-        }
-        g.setColour(style::cream); g.drawText(db<=-60?"-inf":juce::String(db,1),x+208,y,60,20,juce::Justification::right);
-    }
     void timerCallback() override {
         bindVersion(processor.selectedVersion());
         for(int c=0;c<2;++c) levels[c]=juce::jmax(processor.peaks[c].exchange(0,std::memory_order_relaxed),levels[c]*.86f);
+        leftMeter.setPeak(levels[0]); rightMeter.setPeak(levels[1]);
         if(juce::jmax(levels[0],levels[1])>.0001f) angle+=.025f;
         repaint(48,139,884,183);
     }
+    OutputMeter leftMeter{"LEFT"},rightMeter{"RIGHT"};
     TapeProcessor& processor;
     style::Look look;
     std::array<juce::Slider,10> knobs;

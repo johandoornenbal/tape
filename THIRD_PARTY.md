@@ -30,7 +30,7 @@ written test interface for compiling the original source in reference tests.
 
 ## UI reference
 
-The initial JUCE wrapper/build structure and rotary drawing style are adapted
+The initial JUCE wrapper/build structure and rotary/analogue-meter drawing styles are adapted
 from ButterComp Studio, https://github.com/johandoornenbal/codex-tryout,
 commit `3d2daf0d2f350d73640bd03d3f9210cd1b09bbf6` (MIT).
 Its license notice is retained in `third_party/ButterComp-LICENSE`.
