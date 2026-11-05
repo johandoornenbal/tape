@@ -173,7 +173,7 @@ int main() {
         juce::ScopedJuceInitialiser_GUI init;
         checkGainLink();
         std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
-        require(p->getParameters().size()==31 && p->hasEditor(),"Missing parameter banks/editor");
+        require(p->getParameters().size()==37 && p->hasEditor(),"Missing parameter banks/editor");
         require(parameter(*p,"version").getValue()==1.f,"Default must remain ToTape9");
         for(int i=0;i<9;++i) {
             require(dynamic_cast<juce::AudioProcessorParameterWithID*>(p->getParameters()[i])->paramID==controls::id(9,i),"Legacy parameter order changed");
@@ -215,7 +215,7 @@ int main() {
             juce::Decibels::gainToDecibels(static_cast<float>(meterAudio.getMagnitude(1,0,64)),-60.f)};
         // Actual UI selector, independent bank bindings, and selected-bank reset.
         std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditor());
-        require(editor->getWidth()==980 && editor->getHeight()==760,"Wrong editor size");
+        require(editor->getWidth()==980 && editor->getHeight()==830,"Wrong editor size");
         int meterCount=0;
         for(auto* child:editor->getChildren()) if(auto* meter=dynamic_cast<OutputMeter*>(child)) {
             const int channel=meter->getTitle().endsWith("LEFT")?0:1;
@@ -228,7 +228,7 @@ int main() {
         juce::ComboBox* selector=nullptr; juce::TextButton* reset=nullptr;
         for(auto* child:editor->getChildren()) {
             if(auto* combo=dynamic_cast<juce::ComboBox*>(child)) selector=combo;
-            if(auto* button=dynamic_cast<juce::TextButton*>(child)) reset=button;
+            if(auto* button=dynamic_cast<juce::TextButton*>(child); button && button->getComponentID()=="resetParameters") reset=button;
         }
         require(selector && reset && selector->getNumItems()==3,"Missing version selector/reset");
         for(int version:{7,8,9}) {
@@ -255,13 +255,13 @@ int main() {
         juce::MemoryBlock saved; p->getStateInformation(saved);
         std::unique_ptr<juce::AudioProcessor> restored(createPluginFilter());
         restored->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));
-        for(int i=0;i<31;++i) require(restored->getParameters()[i]->getValue()==p->getParameters()[i]->getValue(),"State recall lost version or bank values");
+        for(int i=0;i<37;++i) require(restored->getParameters()[i]->getValue()==p->getParameters()[i]->getValue(),"State recall lost version or bank values");
         // A real legacy-shaped state must select ToTape9 even over a current ToTape7 session.
         auto xml=juce::AudioProcessor::getXmlFromBinary(saved.getData(),static_cast<int>(saved.getSize()));
         auto legacy=juce::ValueTree::fromXml(*xml);
         for(int i=legacy.getNumChildren();--i>=0;) {
             auto id=legacy.getChild(i).getProperty("id").toString();
-            if(id=="version" || id.startsWith("v7_") || id.startsWith("v8_") || id.endsWith("_linkIO")) legacy.removeChild(i,nullptr);
+            if(id=="version" || id.startsWith("v7_") || id.startsWith("v8_") || id.endsWith("_linkIO") || id.endsWith("_matchEnabled") || id.endsWith("_original")) legacy.removeChild(i,nullptr);
         }
         juce::MemoryBlock legacyBytes; auto legacyXml=legacy.createXml();
         juce::AudioProcessor::copyXmlToBinary(*legacyXml,legacyBytes);

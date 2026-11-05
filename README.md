@@ -76,6 +76,41 @@ ClipOnly2 for ToTape7/8, ClipOnly3 for ToTape9. One sample of small-signal laten
 to the host; flutter additionally introduces its original variable delay.
 Parameters are sampled once per audio block, as in the original plugin.
 
+## Per-model LUFS level matching
+
+Each model keeps its own learned gain, Match ON/OFF setting, and Original/Processed
+A/B setting. Switching from ToTape8 to ToTape9 recalls ToTape9's settings. These
+settings and all three learned adjustments are saved in the host session.
+
+Play a representative section and click **Learn Match**. Learning collects
+15 seconds of audible, input-gated windows (about 15.3 seconds of continuous
+audio); silence pauses the clock. **Finish Learning** can finish early after at
+least three seconds. The small **Match -3.0 dB** readout in the lower strip shows
+the signed adjustment, with input and untrimmed tape LUFS beneath it.
+
+The match is a fixed post-engine gain, not continuous automatic gain control.
+The Airwindows DSP and its parameters are untouched. Matching measures the input
+and the tape engine output before compensation, using stereo BS.1770 K-weighting,
+400 ms windows with 100 ms hops, and absolute/relative loudness gates. The learned
+gain ramps over 20 ms, stays fixed, and is capped at +/-24 dB. Positive gain may
+require extra headroom; this feature is not a limiter. Relearn after changing the
+source or tape settings, including Input/Output Link adjustments.
+
+- **Match ON/OFF** enables the selected model's adjustment while retaining it.
+- **A: Original / B: Processed** compares the dry input with the processed path,
+  including matching when enabled. A 5 ms crossfade softens changes; Original
+  has one sample of delay to align the plugin's fixed latency. The tape engine
+  continues processing during Original A/B.
+- **Reset Match** clears only the selected model's learned gain and cancels its
+  measurement. Tape controls, linking, Match ON/OFF, A/B and other models' learned
+  adjustments remain as set.
+
+Changing model during learning cancels that measurement and preserves the last
+successful result. Host bypass pauses measurement. Failed or silent measurements
+keep the previous successful adjustment and report the reason. Older sessions
+load with no learned gain, so their sound stays unchanged. The output meters show
+the final audible output, after matching and A/B selection.
+
 ## Build on your Mac
 
 Install Xcode Command Line Tools (`xcode-select --install`) and CMake 3.22+
@@ -142,9 +177,13 @@ license does not relicense JUCE. See [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Verified in this cloud instance
 
-Linux VST3 compilation passed. All seven CTest suites passed: 63 DSP
+Linux VST3 compilation passed. All nine CTest suites passed: 63 DSP
 scenarios, 144 upstream comparisons with maximum absolute error 0, and the JUCE
-wrapper/editor checks for all three versions.
+wrapper/editor checks for all three versions. Loudness analysis is checked
+against independent libebur128 results at 44.1/48/96/192 kHz. Per-model wrapper
+checks cover learned trim versus the original engine output, post-engine gain,
+A/B alignment, model-specific enable and A/B recall, reset isolation, switch
+cancellation, bypass pause and old-session defaults.
 No physical audio device is available here; audio checks render test buffers.
 The screenshot above comes from the actual editor. Native macOS compilation,
 signing, and DAW playback have not been executed in this Linux instance.

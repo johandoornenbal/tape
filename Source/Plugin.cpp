@@ -8,8 +8,9 @@
 #include "OutputMeter.h"
 #include "MeterBallistics.h"
 #include "GainLinkAttachment.h"
+#include "TapeLevelMatch.h"
 
-class TapeProcessor final : public juce::AudioProcessor {
+class TapeProcessor final : public juce::AudioProcessor, private juce::Timer {
 public:
     TapeProcessor() : AudioProcessor(BusesProperties()
         .withInput("Input",juce::AudioChannelSet::stereo(),true)
@@ -19,7 +20,13 @@ public:
             for(int i=0;i<controls::count(version);++i) values[static_cast<size_t>(version-7)][static_cast<size_t>(i)]=state.getRawParameterValue(controls::id(version,i));
         versionValue=state.getRawParameterValue("version");
         defaults=state.copyState();
+        for(int version=7;version<=9;++version) {
+            matchEnabled[static_cast<size_t>(version-7)]=state.getRawParameterValue(controls::matchId(version));
+            original[static_cast<size_t>(version-7)]=state.getRawParameterValue(controls::originalId(version));
+        }
+        startTimerHz(10);
     }
+    ~TapeProcessor() override { stopTimer(); }
     static juce::AudioProcessorValueTreeState::ParameterLayout layout() {
         juce::AudioProcessorValueTreeState::ParameterLayout p;
         // Keep the original nine parameter IDs and indices for existing sessions/automation.
@@ -36,6 +43,12 @@ public:
         for(int version:{8,9})
             p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{controls::linkId(version),1},
                 "ToTape"+juce::String(version)+" Link Input / Output",false));
+        for(int version:{7,8,9}) {
+            p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{controls::matchId(version),1},
+                "ToTape"+juce::String(version)+" Level Match",true));
+            p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{controls::originalId(version),1},
+                "ToTape"+juce::String(version)+" Original A/B",false));
+        }
         return p;
     }
     int selectedVersion() const { return juce::jlimit(7,9,7+juce::roundToInt(versionValue->load())); }
@@ -44,12 +57,47 @@ public:
         activeVersion=selectedVersion(); setLatencySamples(1); peaks[0]=0; peaks[1]=0;
         meterTimeoutSeconds.store(juce::jmax(.15,2.0*blockSize/rate),std::memory_order_relaxed);
         meterSequence.fetch_add(1,std::memory_order_release);
+        loudness.prepare(rate); learning=false; progress=0; command=0;
+        lastDryL=lastDryR=0;
+        gainSmooth.reset(rate,.02); blendSmooth.reset(rate,.005);
+        gainSmooth.setCurrentAndTargetValue(targetGain(activeVersion));
+        blendSmooth.setCurrentAndTargetValue(original[static_cast<size_t>(activeVersion-7)]->load()>.5f?0.:1.);
     }
     template<class Engine,class T> void render(Engine& e,juce::AudioBuffer<T>& b,int version) {
         for(int i=0;i<controls::count(version);++i) e.setParameter(i,values[static_cast<size_t>(version-7)][static_cast<size_t>(i)]->load());
-        T* data[]{b.getWritePointer(0),b.getWritePointer(1)};
-        if constexpr (std::is_same_v<T,float>) e.processReplacing(data,data,b.getNumSamples());
-        else e.processDoubleReplacing(data,data,b.getNumSamples());
+        // Fixed stack storage preserves dry input without allocating on the audio thread.
+        // Measure the original input and untrimmed tape output, then apply a separate gain.
+        std::array<T,256> dryL{},dryR{};
+        for(int offset=0;offset<b.getNumSamples();offset+=256) {
+            const int count=juce::jmin(256,b.getNumSamples()-offset);
+            auto* left=b.getWritePointer(0)+offset; auto* right=b.getWritePointer(1)+offset;
+            std::copy_n(left,count,dryL.data()); std::copy_n(right,count,dryR.data());
+            T* data[]{left,right};
+            if constexpr (std::is_same_v<T,float>) e.processReplacing(data,data,count);
+            else e.processDoubleReplacing(data,data,count);
+            gainSmooth.setTargetValue(targetGain(version));
+            blendSmooth.setTargetValue(original[static_cast<size_t>(version-7)]->load()>.5f?0.:1.);
+            for(int i=0;i<count;++i) {
+                const auto dryIndex=static_cast<size_t>(i);
+                if(loudness.learning()) {
+                    loudness.sample(dryL[dryIndex],dryR[dryIndex],left[i],right[i]);
+                    if(loudness.complete()) { finishLearn(); gainSmooth.setTargetValue(targetGain(version)); }
+                }
+                // All tape engines report one sample of fixed latency. Align Original
+                // to that same latency for A/B; it never passes through the tape engine.
+                const auto alignedL=lastDryL,alignedR=lastDryR;
+                lastDryL=dryL[dryIndex]; lastDryR=dryR[dryIndex];
+                const auto gain=gainSmooth.getNextValue(),blend=blendSmooth.getNextValue();
+                if(blend<=0) { left[i]=static_cast<T>(alignedL); right[i]=static_cast<T>(alignedR); }
+                else if(blend>=1) {
+                    if(gain<1 || gain>1) { left[i]=static_cast<T>(left[i]*gain); right[i]=static_cast<T>(right[i]*gain); }
+                } else {
+                    left[i]=static_cast<T>(alignedL*(1-blend)+left[i]*gain*blend);
+                    right[i]=static_cast<T>(alignedR*(1-blend)+right[i]*gain*blend);
+                }
+            }
+        }
+        progress=loudness.seconds();
     }
     void releaseResources() override { peaks[0]=0; peaks[1]=0; meterSequence.fetch_add(1,std::memory_order_release); }
     bool isBusesLayoutSupported(const BusesLayout& b) const override {
@@ -61,15 +109,20 @@ public:
         if(b.getNumChannels()<2) { b.clear(); return; }
         const int version=selectedVersion();
         if(version!=activeVersion) {
+            loudness.cancel(); learning=false; progress=0; learnResult=0;
             // Reset only the entering engine, on the audio thread, without allocation.
             if(version==7) engine7.reset(sampleRate);
             else if(version==8) engine8.reset(sampleRate);
             else engine.reset(sampleRate);
             activeVersion=version;
         }
+        handleCommand(version);
         if(version==7) render(engine7,b,version);
         else if(version==8) render(engine8,b,version);
         else render(engine,b,version);
+        publishMeters(b);
+    }
+    template<class T> void publishMeters(juce::AudioBuffer<T>& b) {
         for(int c=0;c<2;++c) {
             const auto peak=static_cast<float>(b.getMagnitude(c,0,b.getNumSamples()));
             auto old=peaks[c].load(std::memory_order_relaxed);
@@ -79,6 +132,15 @@ public:
     }
     void processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { process(b); }
     void processBlock(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { process(b); }
+    template<class T> void bypass(juce::AudioBuffer<T>& b) {
+        handleCommand(selectedVersion());
+        if(b.getNumChannels()>=2 && b.getNumSamples()>0) {
+            lastDryL=b.getSample(0,b.getNumSamples()-1); lastDryR=b.getSample(1,b.getNumSamples()-1);
+            publishMeters(b);
+        }
+    }
+    void processBlockBypassed(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { bypass(b); }
+    void processBlockBypassed(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { bypass(b); }
     bool supportsDoublePrecisionProcessing() const override { return true; }
     const juce::String getName() const override { return "ToTape Studio"; }
     bool acceptsMidi() const override { return false; }
@@ -92,7 +154,16 @@ public:
     bool hasEditor() const override { return true; }
     juce::AudioProcessorEditor* createEditor() override;
     void getStateInformation(juce::MemoryBlock& dst) override {
-        if(auto xml=state.copyState().createXml()) copyXmlToBinary(*xml,dst);
+        auto saved=state.copyState();
+        for(int version=7;version<=9;++version) {
+            const auto prefix="v"+juce::String(version)+"_";
+            const auto& match=matches[static_cast<size_t>(version-7)];
+            saved.setProperty(prefix+"matchDb",match.db.load(),nullptr);
+            saved.setProperty(prefix+"hasMatch",match.learned.load(),nullptr);
+            saved.setProperty(prefix+"inputLufs",match.inputLufs.load(),nullptr);
+            saved.setProperty(prefix+"outputLufs",match.outputLufs.load(),nullptr);
+        }
+        if(auto xml=saved.createXml()) copyXmlToBinary(*xml,dst);
     }
     void setStateInformation(const void* data,int size) override {
         if(auto xml=getXmlFromBinary(data,size); xml && xml->hasTagName(state.state.getType()))
@@ -104,14 +175,80 @@ public:
                 const auto id=child.getProperty("id");
                 if(!restored.getChildWithProperty("id",id).isValid()) restored.addChild(child.createCopy(),-1,nullptr);
             }
+            for(int version=7;version<=9;++version) {
+                const auto prefix="v"+juce::String(version)+"_";
+                auto& match=matches[static_cast<size_t>(version-7)];
+                const auto db=static_cast<float>(restored.getProperty(prefix+"matchDb",0.f));
+                match.db=std::isfinite(db)?juce::jlimit(-24.f,24.f,db):0.f;
+                match.learned=std::isfinite(db)&&static_cast<bool>(restored.getProperty(prefix+"hasMatch",false));
+                const auto in=static_cast<float>(restored.getProperty(prefix+"inputLufs",0.f));
+                const auto out=static_cast<float>(restored.getProperty(prefix+"outputLufs",0.f));
+                match.inputLufs=std::isfinite(in)?in:0.f; match.outputLufs=std::isfinite(out)?out:0.f;
+            }
+            command=4; learning=false; progress=0; learnResult=0;
             state.replaceState(restored);
         }
     }
+    double targetGain(int version) const {
+        const auto index=static_cast<size_t>(version-7);
+        return matches[index].learned.load() && matchEnabled[index]->load()>.5f
+            ? std::pow(10.,static_cast<double>(matches[index].db.load())/20.) : 1.;
+    }
+    void requestLearn() {
+        const auto version=selectedVersion();
+        command=version*8+(learning.load() && learningVersion.load()==version?2:1);
+    }
+    void resetMatch() {
+        const auto version=selectedVersion();
+        matches[static_cast<size_t>(version-7)].clear();
+        learning=false; progress=0; learnResult=0; command=version*8+3; matchRevision.fetch_add(1);
+    }
+    std::array<TapeMatchState,3> matches;
+    std::atomic<bool> learning{false};
+    std::atomic<int> learningVersion{9},learnResult{0};
+    std::atomic<float> progress{0};
+    std::atomic<int> command{0};
+    std::atomic<uint32_t> matchRevision{0};
     juce::AudioProcessorValueTreeState state;
     std::atomic<float> peaks[2]{};
     std::atomic<uint32_t> meterSequence{0};
     std::atomic<double> meterTimeoutSeconds{.15};
 private:
+    void finishLearn() {
+        const auto result=loudness.finish();
+        if(result==LoudnessMatch::Result::success || result==LoudnessMatch::Result::limited) {
+            auto& match=matches[static_cast<size_t>(learningVersion.load()-7)];
+            match.db=static_cast<float>(loudness.trimDb);
+            match.inputLufs=static_cast<float>(loudness.inputLufs); match.outputLufs=static_cast<float>(loudness.outputLufs);
+            match.learned=true; matchRevision.fetch_add(1);
+        }
+        learnResult=static_cast<int>(result); learning=false;
+    }
+    void handleCommand(int version) {
+        const auto request=command.exchange(0);
+        if(request==4) { loudness.cancel(); learning=false; return; }
+        if(request==0) return;
+        const auto model=request/8,action=request%8;
+        if(action==3) {
+            matches[static_cast<size_t>(model-7)].clear();
+            if(learningVersion.load()==model) { loudness.cancel(); learning=false; progress=0; learnResult=0; }
+        } else if(model==version) {
+            if(action==1) { loudness.start(); learningVersion=version; learning=true; progress=0; learnResult=0; }
+            if(action==2 && learning.load() && learningVersion.load()==version) finishLearn();
+        }
+    }
+    void timerCallback() override {
+        const auto revision=matchRevision.load();
+        if(revision!=notifiedRevision) {
+            notifiedRevision=revision;
+            updateHostDisplay(ChangeDetails{}.withNonParameterStateChanged(true));
+        }
+    }
+    LoudnessMatch loudness;
+    juce::SmoothedValue<double> gainSmooth{1.},blendSmooth{1.};
+    std::array<std::atomic<float>*,3> matchEnabled{},original{};
+    double lastDryL=0,lastDryR=0;
+    uint32_t notifiedRevision=0;
     TapeEngine engine;
     TapeEngine7 engine7;
     TapeEngine8 engine8;
@@ -170,6 +307,26 @@ public:
         linkToggle.setColour(juce::ToggleButton::tickColourId,style::ink);
         linkToggle.setColour(juce::ToggleButton::tickDisabledColourId,style::ink.withAlpha(.55f));
         addAndMakeVisible(linkToggle);
+        for(auto* button:{&learnButton,&resetMatchButton,&enableMatchButton,&originalButton}) {
+            addAndMakeVisible(*button);
+            button->setColour(juce::TextButton::buttonColourId,style::ink.brighter(.15f));
+            button->setColour(juce::TextButton::textColourOffId,style::cream);
+        }
+        learnButton.setComponentID("learnMatch"); resetMatchButton.setComponentID("resetMatch");
+        enableMatchButton.setComponentID("matchEnabled"); originalButton.setComponentID("abOriginal");
+        learnButton.onClick=[this] { processor.requestLearn(); refreshMatch(); };
+        resetMatchButton.onClick=[this] { processor.resetMatch(); refreshMatch(); };
+        enableMatchButton.setClickingTogglesState(true); originalButton.setClickingTogglesState(true);
+        learnButton.setTooltip("Learn a fixed LUFS level match for the selected model from up to 15 seconds of audible audio. Finish after at least 3 seconds.");
+        resetMatchButton.setTooltip("Clear only this model's learned adjustment. Tape controls, linking and A/B remain as set.");
+        enableMatchButton.setTooltip("Enable or disable this model's saved level match.");
+        originalButton.setTooltip("Compare original input with the processed path, using a short crossfade. Original is delayed one sample to align the plugin's fixed latency.");
+        addAndMakeVisible(matchReadout); addAndMakeVisible(matchStatus);
+        matchReadout.setComponentID("matchReadout"); matchStatus.setComponentID("matchStatus");
+        matchReadout.setColour(juce::Label::textColourId,style::gold);
+        matchReadout.setFont(juce::FontOptions(13.f)); matchReadout.setJustificationType(juce::Justification::right);
+        matchStatus.setColour(juce::Label::textColourId,style::cream.withAlpha(.7f));
+        matchStatus.setFont(juce::FontOptions(11.f));
         selector.setName("Tape version");
         selector.setTooltip("Choose the original ToTape7, ToTape8 or ToTape9 algorithm. Each version retains its own controls.");
         selector.addItemList({"ToTape7","ToTape8","ToTape9"},1);
@@ -180,6 +337,7 @@ public:
         selectorAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,"version",selector);
         selector.onChange=[this] { if(selector.getSelectedId()>0) bindVersion(selector.getSelectedId()+6); };
         bindVersion(processor.selectedVersion());
+        reset.setComponentID("resetParameters");
         reset.setButtonText("RESET TO DEFAULT"); reset.setTooltip("Reset only the selected version to the Airwindows defaults.");
         reset.onClick=[this] {
             const auto version=processor.selectedVersion();
@@ -199,7 +357,7 @@ public:
         }
         leftMeter.setLevelDb(ballistics[0].getLevelDb()); rightMeter.setLevelDb(ballistics[1].getLevelDb());
         lastMeterTime=juce::Time::getMillisecondCounterHiRes();
-        setSize(980,760); startTimerHz(60);
+        setSize(980,830); startTimerHz(60);
     }
     ~TapeEditor() override { stopTimer(); setLookAndFeel(nullptr); }
     void resized() override {
@@ -212,6 +370,9 @@ public:
         linkToggle.setBounds(330,14,200,24);
         selector.setBounds(540,42,180,30);
         reset.setBounds(750,42,180,30);
+        learnButton.setBounds(48,729,140,28); resetMatchButton.setBounds(200,729,110,28);
+        enableMatchButton.setBounds(322,729,110,28); originalButton.setBounds(444,729,140,28);
+        matchReadout.setBounds(602,729,330,28); matchStatus.setBounds(48,764,884,20);
     }
     void paint(juce::Graphics& g) override {
         using namespace style;
@@ -220,10 +381,10 @@ public:
         g.drawText("YODO AUDIO    /    AIRWINDOWS DSP",32,17,650,20,juce::Justification::left);
         g.setFont(juce::FontOptions(40.f)); g.drawText("ToTape",30,40,240,55,juce::Justification::left);
         g.setFont(juce::FontOptions(13.f)); g.drawText("S T U D I O   /   0 "+juce::String(shownVersion),248,61,300,20,juce::Justification::left);
-        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343d36),0,108,juce::Colour(0xff1b2420),0,720,false));
-        g.fillRoundedRectangle(16,108,948,610,16);
-        g.setColour(gold.withAlpha(.2f)); g.drawRoundedRectangle({17.f,109.f,946.f,608.f},15,1);
-        for(float x:{30.f,950.f}) for(float y:{122.f,704.f}) {
+        g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343d36),0,108,juce::Colour(0xff1b2420),0,790,false));
+        g.fillRoundedRectangle(16,108,948,680,16);
+        g.setColour(gold.withAlpha(.2f)); g.drawRoundedRectangle({17.f,109.f,946.f,678.f},15,1);
+        for(float x:{30.f,950.f}) for(float y:{122.f,774.f}) {
             g.setColour(juce::Colour(0xff111a15)); g.fillEllipse(x-4,y-4,8,8);
             g.setColour(juce::Colour(0xff646c5b)); g.drawLine(x-2,y+1,x+2,y-1,1);
         }
@@ -241,19 +402,21 @@ public:
         g.drawText("SAMPLE PEAK",426,275,128,18,juce::Justification::centred);
         g.setColour(cream.withAlpha(.12f)); g.drawHorizontalLine(341,49,931);
         g.drawHorizontalLine(533,138,842);
+        g.drawHorizontalLine(713,48,932);
         const int top[]{0,1,2,5,8},bottom[]{3,4,6,7,9};
         g.setColour(gold); g.setFont(juce::FontOptions(11.f));
         for(int j=0;j<5;++j) g.drawText(juce::String(controls::name(shownVersion,top[j])).toUpperCase(),48+j*180,351,164,22,juce::Justification::centred);
         const auto columns=shownVersion==7?5:4;
         for(int j=0;j<columns;++j) g.drawText(juce::String(controls::name(shownVersion,bottom[j])).toUpperCase(),(columns==5?48:138)+j*180,536,164,22,juce::Justification::centred);
         g.setColour(ink.withAlpha(.65f)); g.setFont(juce::FontOptions(11.f));
-        g.drawText("ToTape"+juce::String(shownVersion)+" by Airwindows  /  Independent studio edition",32,726,710,24,juce::Justification::left);
-        g.drawText("STEREO  /  FLOAT / DOUBLE",700,726,248,24,juce::Justification::right);
+        g.drawText("ToTape"+juce::String(shownVersion)+" by Airwindows  /  Independent studio edition",32,796,710,24,juce::Justification::left);
+        g.drawText("STEREO  /  FLOAT / DOUBLE",700,796,248,24,juce::Justification::right);
     }
 private:
     void bindVersion(int version) {
         if(version==shownVersion) return;
         gainLinkAttachment.reset();
+        enableMatchAttachment.reset(); originalAttachment.reset();
         for(auto& attachment:attachments) attachment.reset();
         shownVersion=version;
         linkToggle.setVisible(version!=7);
@@ -275,7 +438,32 @@ private:
                 *processor.state.getParameter(controls::id(version,8)),
                 *processor.state.getParameter(controls::linkId(version)),
                 knobs[0],knobs[8],linkToggle);
-        resized(); repaint();
+        enableMatchAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.state,controls::matchId(version),enableMatchButton);
+        originalAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.state,controls::originalId(version),originalButton);
+        refreshMatch(); resized(); repaint();
+    }
+    void refreshMatch() {
+        const auto& match=processor.matches[static_cast<size_t>(shownVersion-7)];
+        const bool learned=match.learned.load();
+        const bool active=processor.learning.load() && processor.learningVersion.load()==shownVersion;
+        const float db=match.db.load();
+        const auto trim=(db>=0?juce::String("+"):juce::String{})+juce::String(db,1)+" dB";
+        matchReadout.setText(learned?"Match "+trim:"Match -- dB",juce::dontSendNotification);
+        learnButton.setButtonText(active?"Finish Learning":"Learn Match");
+        enableMatchButton.setButtonText(enableMatchButton.getToggleState()?"Match ON":"Match OFF");
+        originalButton.setButtonText(originalButton.getToggleState()?"A: Original":"B: Processed");
+        juce::String text;
+        if(active) text="ToTape"+juce::String(shownVersion)+" learning: "+juce::String(processor.progress.load(),1)+" / 15 s of audio";
+        else if(processor.learnResult.load()==static_cast<int>(LoudnessMatch::Result::tooShort)) text="Not enough audio. Play at least 3 seconds and retry.";
+        else if(processor.learnResult.load()==static_cast<int>(LoudnessMatch::Result::noOutput)) text="No measurable tape output. Check the tape settings and retry.";
+        else if(learned) {
+            text="Input "+juce::String(match.inputLufs.load(),1)+" / Tape "+juce::String(match.outputLufs.load(),1)+" LUFS";
+            if(std::abs(match.inputLufs.load()-match.outputLufs.load()-db)>.1f) text+=" | Gain capped at 24 dB";
+            if(originalButton.getToggleState()) text+=" | Listening to original";
+            else if(!enableMatchButton.getToggleState()) text+=" | Compensation disabled";
+            else text+=" | Fixed gain applied";
+        } else text="Play a representative section, then Learn Match for ToTape"+juce::String(shownVersion)+".";
+        matchStatus.setText(text,juce::dontSendNotification);
     }
     void drawReel(juce::Graphics& g,float x,float y,float rotation) {
         using namespace style;
@@ -296,6 +484,7 @@ private:
     }
     void timerCallback() override {
         bindVersion(processor.selectedVersion());
+        refreshMatch();
         const auto now=juce::Time::getMillisecondCounterHiRes();
         const auto elapsed=(now-lastMeterTime)*.001;
         lastMeterTime=now;
@@ -323,6 +512,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> selectorAttachment;
     int shownVersion=0;
     juce::TextButton reset;
+    juce::TextButton learnButton{"Learn Match"},resetMatchButton{"Reset Match"},enableMatchButton{"Match ON"},originalButton{"B: Processed"};
+    juce::Label matchReadout,matchStatus;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enableMatchAttachment,originalAttachment;
     juce::TooltipWindow tooltip{this,600};
     std::array<MeterBallistics,2> ballistics;
     std::array<float,2> targets{};

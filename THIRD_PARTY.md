@@ -45,3 +45,19 @@ with the applicable JUCE license, including corresponding source obligations whe
 using AGPLv3, or use an appropriate commercial license. The MIT license for this
 wrapper does not relicense JUCE. Retain the VST3 SDK license notices bundled with
 JUCE. This is not an official Airwindows or JUCE product.
+
+## Level matching
+
+The independent LUFS measurement algorithm and reference test are adapted from
+ButterComp Studio commit `c60fa1b798b02b158287f14783efa18aaa85b721` (MIT).
+The existing ButterComp license notice is retained. ToTape extends the wrapper
+with independent per-model learned states and post-engine gain, plus a latency-
+aligned Original A/B. No Airwindows DSP source is modified for this feature.
+
+The stereo BS.1770 K-weighting filter design follows libebur128 by Jan Kokemueller
+(MIT), pinned at `67b33abe1558160ed76ada1322329b0e9e058b02` from
+https://github.com/jiixyj/libebur128. Its C source and license are retained in
+`third_party/libebur128` as an independent test oracle, not linked into the
+plugin. Queue compatibility code retains its embedded BSD license notices.
+`Source/LoudnessMatch.h` uses bounded 400 ms windows, 100 ms hops, a -70 LUFS
+absolute gate and -10 LU relative gate for learning.
