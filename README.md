@@ -7,6 +7,11 @@ Airwindows release.
 
 ![Native plugin editor](docs/ui-preview.png)
 
+Choose **Small (75%)**, **Medium (100%)**, or **Large (125%)** from the size menu
+at the top right. The whole interface scales proportionally for all three tape
+models. The size is saved per plugin instance with the session and retained when
+reopening the editor. Older sessions open at Medium, the original size.
+
 Choose **ToTape7**, **ToTape8**, or **ToTape9** from the selector at the top.
 The controls update to the original parameters of that version. Each version has
 its own automatable parameter bank, retained when switching and saved with the

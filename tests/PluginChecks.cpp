@@ -80,13 +80,13 @@ void checkGainLink() {
     std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
     std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditor());
     juce::ComboBox* selector=nullptr; juce::ToggleButton* link=nullptr;
-    for(auto* child:editor->getChildren()) {
-        if(auto* combo=dynamic_cast<juce::ComboBox*>(child)) selector=combo;
+    for(auto* child:editor->getChildComponent(0)->getChildren()) {
+        if(auto* combo=dynamic_cast<juce::ComboBox*>(child);combo && combo->getName()=="Tape version") selector=combo;
         if(auto* toggle=dynamic_cast<juce::ToggleButton*>(child)) link=toggle;
     }
     require(selector && link,"Missing input/output link control");
     auto slider=[&](const juce::String& name) {
-        for(auto* child:editor->getChildren()) if(auto* v=dynamic_cast<juce::Slider*>(child);v && v->getName()==name) return v;
+        for(auto* child:editor->getChildComponent(0)->getChildren()) if(auto* v=dynamic_cast<juce::Slider*>(child);v && v->getName()==name) return v;
         throw std::runtime_error("Slider not found");
     };
     auto close=[](double a,double b) { return std::abs(a-b)<1.e-6; };
@@ -167,8 +167,65 @@ void checkGainLink() {
     compare<TapeEngine8,float>(*p,8,48000); compare<TapeEngine8,double>(*p,8,48000);
     compare<TapeEngine,float>(*p,9,48000); compare<TapeEngine,double>(*p,9,48000);
 }
+void checkSizes() {
+    std::unique_ptr<juce::AudioProcessor> p(createPluginFilter());
+    std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditor());
+    auto* panel=editor->getChildComponent(0);
+    auto* sizes=dynamic_cast<juce::ComboBox*>(panel->findChildWithID("uiSize"));
+    require(sizes && sizes->getNumItems()==3 && sizes->getSelectedId()==2,"Missing size menu/default");
+    juce::ComboBox* models=nullptr;
+    for(auto* child:panel->getChildren())
+        if(auto* combo=dynamic_cast<juce::ComboBox*>(child);combo && combo->getName()=="Tape version") models=combo;
+    require(models!=nullptr,"Missing model selector");
+    for(int id:{1,3,2}) {
+        sizes->setSelectedId(id,juce::sendNotificationSync);
+        const float scale=id==1?.75f:id==3?1.25f:1.f;
+        const int width=juce::roundToInt(980*scale),height=juce::roundToInt(830*scale);
+        require(editor->getWidth()==width && editor->getHeight()==height,"Incorrect scaled editor size");
+        for(int version:{7,8,9}) {
+            models->setSelectedId(version-6,juce::sendNotificationSync);
+            require(sizes->getSelectedId()==id,"Model switching changed UI size");
+            for(auto* child:panel->getChildren()) if(child->isVisible()) {
+                require(editor->getLocalBounds().contains(editor->getLocalArea(panel,child->getBounds())),"Scaled control outside editor");
+                const auto centre=editor->getLocalPoint(child,child->getLocalBounds().getCentre());
+                require(editor->getComponentAt(centre)!=editor.get(),"Scaled control hit testing failed");
+                if(auto* slider=dynamic_cast<juce::Slider*>(child)) {
+                    slider->setValue(.37,juce::sendNotificationSync);
+                    require(std::abs(slider->getValue()-.37)<1.e-6,"Scaled slider cannot be edited");
+                }
+            }
+            juce::Image image(juce::Image::ARGB,width,height,true);
+            juce::Graphics graphics(image); editor->paintEntireComponent(graphics,true);
+            auto file=juce::File::getCurrentWorkingDirectory().getChildFile("ui-size-"+juce::String(id)+"-model-"+juce::String(version)+".png");
+            auto out=file.createOutputStream(); require(out!=nullptr,"Cannot save size preview");
+            out->setPosition(0); out->truncate();
+            require(juce::PNGImageFormat().writeImageToStream(image,*out),"Cannot render scaled editor");
+        }
+        juce::MemoryBlock saved; p->getStateInformation(saved);
+        std::unique_ptr<juce::AudioProcessor> restored(createPluginFilter());
+        restored->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));
+        std::unique_ptr<juce::AudioProcessorEditor> recalled(restored->createEditor());
+        require(recalled->getWidth()==width && recalled->getHeight()==height,"Session lost UI size");
+        editor.reset(); editor.reset(p->createEditor());
+        panel=editor->getChildComponent(0);
+        sizes=dynamic_cast<juce::ComboBox*>(panel->findChildWithID("uiSize"));
+        for(auto* child:panel->getChildren())
+            if(auto* combo=dynamic_cast<juce::ComboBox*>(child);combo && combo->getName()=="Tape version") models=combo;
+        require(sizes && sizes->getSelectedId()==id,"Reopening editor lost UI size");
+    }
+    // An older session overrides any previously selected size with Medium.
+    sizes->setSelectedId(3,juce::sendNotificationSync);
+    juce::MemoryBlock saved; p->getStateInformation(saved);
+    auto xml=juce::AudioProcessor::getXmlFromBinary(saved.getData(),static_cast<int>(saved.getSize()));
+    xml->removeAttribute("uiSize");
+    juce::AudioProcessor::copyXmlToBinary(*xml,saved);
+    p->setStateInformation(saved.getData(),static_cast<int>(saved.getSize()));
+    editor.reset(); editor.reset(p->createEditor());
+    require(editor->getWidth()==980 && editor->getHeight()==830,"Legacy session did not default to Medium");
+}
 int main() {
     try {
+        checkSizes();
         checkMeterDamping();
         juce::ScopedJuceInitialiser_GUI init;
         checkGainLink();
@@ -217,7 +274,7 @@ int main() {
         std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditor());
         require(editor->getWidth()==980 && editor->getHeight()==830,"Wrong editor size");
         int meterCount=0;
-        for(auto* child:editor->getChildren()) if(auto* meter=dynamic_cast<OutputMeter*>(child)) {
+        for(auto* child:editor->getChildComponent(0)->getChildren()) if(auto* meter=dynamic_cast<OutputMeter*>(child)) {
             const int channel=meter->getTitle().endsWith("LEFT")?0:1;
             require(editor->getLocalBounds().contains(meter->getBounds()),"Meter outside editor");
             require(std::abs(meter->getLevelDb()-expectedMeterDb[channel])<1.e-5f,"Analogue meter does not match actual channel output");
@@ -226,8 +283,8 @@ int main() {
         require(meterCount==2,"Missing stereo analogue meters");
         p->releaseResources();
         juce::ComboBox* selector=nullptr; juce::TextButton* reset=nullptr;
-        for(auto* child:editor->getChildren()) {
-            if(auto* combo=dynamic_cast<juce::ComboBox*>(child)) selector=combo;
+        for(auto* child:editor->getChildComponent(0)->getChildren()) {
+            if(auto* combo=dynamic_cast<juce::ComboBox*>(child);combo && combo->getName()=="Tape version") selector=combo;
             if(auto* button=dynamic_cast<juce::TextButton*>(child); button && button->getComponentID()=="resetParameters") reset=button;
         }
         require(selector && reset && selector->getNumItems()==3,"Missing version selector/reset");
@@ -235,7 +292,7 @@ int main() {
             selector->setSelectedId(version-6,juce::sendNotificationSync);
             require(parameter(*p,"version").getValue()==static_cast<float>(version-7)*.5f,"Selector not bound");
             int count=0;
-            for(auto* child:editor->getChildren()) if(auto* slider=dynamic_cast<juce::Slider*>(child);slider && slider->isVisible()) {
+            for(auto* child:editor->getChildComponent(0)->getChildren()) if(auto* slider=dynamic_cast<juce::Slider*>(child);slider && slider->isVisible()) {
                 require(editor->getLocalBounds().contains(slider->getBounds()),"Control outside editor");
                 require(slider->getName()==controls::name(version,count),"Wrong version control");
                 slider->setValue(.37,juce::sendNotificationSync);
@@ -245,7 +302,7 @@ int main() {
             require(count==controls::count(version),"Incorrect visible control count");
             reset->onClick();
             for(int i=0;i<count;++i) require(parameter(*p,controls::id(version,i)).getValue()==.5f,"Reset failed");
-            for(auto* child:editor->getChildren()) if(auto* slider=dynamic_cast<juce::Slider*>(child);slider && slider->isVisible())
+            for(auto* child:editor->getChildComponent(0)->getChildren()) if(auto* slider=dynamic_cast<juce::Slider*>(child);slider && slider->isVisible())
                 require(slider->getTextFromValue(slider->getValue())==(slider->getName()=="Head frequency"?"68.8 Hz":"50.0 %"),"Wrong displayed default");
             savePreview(*editor,version);
             parameter(*p,controls::id(version,0)).setValueNotifyingHost(static_cast<float>(version)*.1f);

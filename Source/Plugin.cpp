@@ -155,6 +155,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     void getStateInformation(juce::MemoryBlock& dst) override {
         auto saved=state.copyState();
+        saved.setProperty("uiSize",uiSize.load(),nullptr);
         for(int version=7;version<=9;++version) {
             const auto prefix="v"+juce::String(version)+"_";
             const auto& match=matches[static_cast<size_t>(version-7)];
@@ -169,6 +170,7 @@ public:
         if(auto xml=getXmlFromBinary(data,size); xml && xml->hasTagName(state.state.getType()))
         {
             auto restored=juce::ValueTree::fromXml(*xml);
+            uiSize=juce::jlimit(1,3,static_cast<int>(restored.getProperty("uiSize",2)));
             // Legacy ToTape9 sessions have no version or extra banks. Supply defaults
             // even when loading into an instance that previously selected another version.
             for(const auto& child:defaults) {
@@ -209,6 +211,7 @@ public:
     std::atomic<float> progress{0};
     std::atomic<int> command{0};
     std::atomic<uint32_t> matchRevision{0};
+    std::atomic<int> uiSize{2};
     juce::AudioProcessorValueTreeState state;
     std::atomic<float> peaks[2]{};
     std::atomic<uint32_t> meterSequence{0};
@@ -290,9 +293,9 @@ public:
 };
 }
 
-class TapeEditor final : public juce::AudioProcessorEditor, private juce::Timer {
+class TapePanel final : public juce::Component, private juce::Timer {
 public:
-    explicit TapeEditor(TapeProcessor& p) : AudioProcessorEditor(p), processor(p) {
+    explicit TapePanel(TapeProcessor& p) : processor(p) {
         setLookAndFeel(&look);
         for(size_t i=0;i<knobs.size();++i) {
             auto& slider=knobs[i]; addAndMakeVisible(slider);
@@ -357,10 +360,27 @@ public:
         }
         leftMeter.setLevelDb(ballistics[0].getLevelDb()); rightMeter.setLevelDb(ballistics[1].getLevelDb());
         lastMeterTime=juce::Time::getMillisecondCounterHiRes();
+        addAndMakeVisible(sizeChoice);
+        sizeChoice.setComponentID("uiSize"); sizeChoice.setName("Interface size");
+        sizeChoice.setTooltip("Interface size: Small 75%, Medium 100%, or Large 125%.");
+        sizeChoice.addItem("Small (75%)",1);
+        sizeChoice.addItem("Medium (100%)",2);
+        sizeChoice.addItem("Large (125%)",3);
+        sizeChoice.setColour(juce::ComboBox::backgroundColourId,style::ink);
+        sizeChoice.setColour(juce::ComboBox::textColourId,style::gold);
+        sizeChoice.setColour(juce::ComboBox::outlineColourId,style::gold.withAlpha(.4f));
+        sizeChoice.setSelectedId(processor.uiSize.load(),juce::dontSendNotification);
+        sizeChoice.onChange=[this] {
+            processor.uiSize=sizeChoice.getSelectedId();
+            processor.updateHostDisplay(juce::AudioProcessor::ChangeDetails{}.withNonParameterStateChanged(true));
+            if(sizeChanged) sizeChanged();
+        };
         setSize(980,830); startTimerHz(60);
     }
-    ~TapeEditor() override { stopTimer(); setLookAndFeel(nullptr); }
+    ~TapePanel() override { stopTimer(); setLookAndFeel(nullptr); }
+    std::function<void()> sizeChanged;
     void resized() override {
+        sizeChoice.setBounds(750,10,180,26);
         const int top[]{0,1,2,5,8},bottom[]{3,4,6,7,9};
         for(int j=0;j<5;++j) knobs[static_cast<size_t>(top[j])].setBounds(48+j*180,370,164,150);
         const auto columns=shownVersion==7?5:4;
@@ -483,6 +503,10 @@ private:
         g.setColour(cream); g.fillEllipse(x-4,y-4,8,8);
     }
     void timerCallback() override {
+        if(sizeChoice.getSelectedId()!=processor.uiSize.load()) {
+            sizeChoice.setSelectedId(processor.uiSize.load(),juce::dontSendNotification);
+            if(sizeChanged) sizeChanged();
+        }
         bindVersion(processor.selectedVersion());
         refreshMatch();
         const auto now=juce::Time::getMillisecondCounterHiRes();
@@ -508,7 +532,7 @@ private:
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,10> attachments;
     juce::ToggleButton linkToggle;
     std::unique_ptr<GainLinkAttachment> gainLinkAttachment;
-    juce::ComboBox selector;
+    juce::ComboBox selector,sizeChoice;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> selectorAttachment;
     int shownVersion=0;
     juce::TextButton reset;
@@ -521,6 +545,25 @@ private:
     uint32_t lastMeterSequence=0;
     double lastMeterTime=0,idleSeconds=0;
     float angle=0;
+};
+// Keep logical layout and hit testing together; host/HiDPI scaling remains independent.
+class TapeEditor final : public juce::AudioProcessorEditor {
+public:
+    explicit TapeEditor(TapeProcessor& p) : AudioProcessorEditor(p), processor(p), panel(p) {
+        addAndMakeVisible(panel);
+        setResizable(false,false);
+        panel.sizeChanged=[this] { applySize(); };
+        applySize();
+    }
+private:
+    void applySize() {
+        const float scale=processor.uiSize.load()==1?.75f:processor.uiSize.load()==3?1.25f:1.f;
+        panel.setTransform(juce::AffineTransform::scale(scale));
+        panel.setBounds(0,0,980,830);
+        setSize(juce::roundToInt(980*scale),juce::roundToInt(830*scale));
+    }
+    TapeProcessor& processor;
+    TapePanel panel;
 };
 juce::AudioProcessorEditor* TapeProcessor::createEditor() { return new TapeEditor(*this); }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new TapeProcessor; }

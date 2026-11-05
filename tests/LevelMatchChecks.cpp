@@ -25,12 +25,12 @@ struct UI {
     std::unique_ptr<juce::AudioProcessorEditor> editor;
     explicit UI(juce::AudioProcessor& p):editor(p.createEditor()) {}
     juce::Component& component(const char* id) {
-        for(auto* c:editor->getChildren()) if(c->getComponentID()==id) return *c;
+        for(auto* c:editor->getChildComponent(0)->getChildren()) if(c->getComponentID()==id) return *c;
         throw std::runtime_error("Missing UI component");
     }
     void click(const char* id) { dynamic_cast<juce::TextButton&>(component(id)).onClick(); }
     void select(int version) {
-        for(auto* c:editor->getChildren()) if(auto* combo=dynamic_cast<juce::ComboBox*>(c)) combo->setSelectedId(version-6,juce::sendNotificationSync);
+        for(auto* c:editor->getChildComponent(0)->getChildren()) if(auto* combo=dynamic_cast<juce::ComboBox*>(c);combo && combo->getName()=="Tape version") combo->setSelectedId(version-6,juce::sendNotificationSync);
     }
     void refresh(int version) { select(version==7?8:7); select(version); }
 };
