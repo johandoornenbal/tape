@@ -116,38 +116,54 @@ keep the previous successful adjustment and report the reason. Older sessions
 load with no learned gain, so their sound stays unchanged. The output meters show
 the final audible output, after matching and A/B selection.
 
-## Build on your Mac
+## Build, sign, and install on your Mac
 
 Install Xcode Command Line Tools (`xcode-select --install`) and CMake 3.22+
-(for example, `brew install cmake`). From the repository root:
+(`brew install cmake`), close your DAW, then run from the repository:
 
 ```sh
-cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-cmake --build build-mac --config Release --parallel 3
-ctest --test-dir build-mac -C Release --output-on-failure
+bash scripts/build-sign-install-mac.sh
 ```
 
-The first configure downloads pinned JUCE 8.0.12. An existing copy can be supplied
-with `-DJUCE_PATH=/absolute/path/to/JUCE`.
+This one command builds and tests the Apple Silicon VST3, ad-hoc signs a staged
+copy, verifies its signature, and installs it to:
 
-The output is `build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3`.
-To install locally:
+`~/Library/Audio/Plug-Ins/VST3/ToTape Studio.vst3`
+
+An existing installation is replaced only after the new copy passes signing and
+verification. If replacement fails, the script attempts to restore the previous
+installation. The source bundle is left unchanged. Restart or rescan plugins in
+your VST3 DAW afterwards.
+
+To sign and install an already downloaded/extracted bundle without compiling:
 
 ```sh
-codesign --force --deep --sign - "build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3"
-mkdir -p "$HOME/Library/Audio/Plug-Ins/VST3"
-ditto "build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3" \
-  "$HOME/Library/Audio/Plug-Ins/VST3/ToTape Studio.vst3"
+bash scripts/build-sign-install-mac.sh --install-only "/path/to/ToTape Studio.vst3"
 ```
 
-Restart or rescan plugins in your VST3-compatible DAW. Logic Pro requires Audio
-Unit and cannot load this VST3 build. Ad-hoc signing is for local use;
-distribution requires appropriate Developer ID signing and notarization.
+The script targets arm64 (including M2 and later) and macOS 11+, uses no `sudo`,
+and follows the workflow from [GuitarSim](https://github.com/johandoornenbal/guitarsim).
+Run it in a native Apple Silicon terminal with Rosetta disabled. The bundle is
+ad-hoc signed, not notarized. Logic Pro requires an Audio Unit and cannot load
+this VST3 target.
 
-GitHub Actions builds and tests the arm64 VST3 on macOS, ad-hoc signs the bundle,
-and uploads `ToTape-Studio-macOS-arm64.zip`. The archive contains only the VST3
-bundle, matching ButterComp's build setup.
+Optional `TAPE_BUILD_DIR` and `TAPE_INSTALL_DIR` environment variables
+override the build and installation folders. Extra CMake configure arguments are
+passed through, for example:
+
+```sh
+bash scripts/build-sign-install-mac.sh -DJUCE_PATH=/absolute/path/to/JUCE
+```
+
+The first configure downloads pinned JUCE 8.0.12 unless an existing checkout is
+provided. The default build output is:
+
+`build-mac/ToTapeStudio_artefacts/Release/VST3/ToTape Studio.vst3`
+
+For command-line options, run `bash scripts/build-sign-install-mac.sh --help`.
+GitHub Actions also builds, tests, ad-hoc signs, and archives the arm64 VST3.
+Actual macOS compilation, signing, and DAW playback require verification on a Mac;
+Linux script checks do not establish that those steps work.
 
 ## Checks
 
